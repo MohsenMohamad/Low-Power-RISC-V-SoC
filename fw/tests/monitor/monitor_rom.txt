@@ -1,27 +1,51 @@
-# Boot ROM fallback monitor: no application image in RAM.
-< \[ROM\] LPSOC boot ROM 1\.0, reset cause POR
+# Boot ROM fallback monitor on the integrated SoC: no application image in RAM.
+< \[ROM\] LPSOC boot ROM 2\.0, reset cause POR$
 < \[ROM\] no valid image
 < monitor ready
 > help
 < ^  peek
 < ^  go
 ! ^  run
+! ^  reset
 > peek handoff.boot_status
-< ^0x20000004: 0x00000004$
-> peek pmu.rst_cause
-< ^0x40002010: 0x00000001$
-> regs cache
-< ^cache\.ctrl +0x50000000: 0x00000003$
-# load a 3-instruction program by hand and run it:
-#   lui t0, 0x4f000 ; sw zero, 0(t0) [simctrl EXIT = 0] ; j .
-> poke 0x20002000 0x4f0002b7
+< ^0x10000004: 0x00000004$
+> peek handoff.boot_reason
+< ^0x1000000c: 0x00000001$
+> peek pmu.status
+< ^0x20003004: 0x00000200$
+> regs wtimer
+< ^wtimer\.ctrl +0x20004000: 0x00000000$
+> peek 0x20008000
+< ^ERR fault 0x20008000$
+# load a program by hand and run it: it prints "PASS" on the UART (the
+# testbench's end-of-run line) and stops:
+#   lui t0, 0x20000 ; li t1, 'P' ; sw t1, 0(t0) ; li t1, 'A' ; sw t1, 0(t0) ;
+#   li t1, 'S' ; sw t1, 0(t0) ; sw t1, 0(t0) ; li t1, '\n' ; sw t1, 0(t0) ; j .
+> poke 0x10002000 0x200002b7
 < ^OK$
-> poke 0x20002004 0x0002a023
+> poke 0x10002004 0x05000313
 < ^OK$
-> poke 0x20002008 0x0000006f
+> poke 0x10002008 0x0062a023
+< ^OK$
+> poke 0x1000200c 0x04100313
+< ^OK$
+> poke 0x10002010 0x0062a023
+< ^OK$
+> poke 0x10002014 0x05300313
+< ^OK$
+> poke 0x10002018 0x0062a023
+< ^OK$
+> poke 0x1000201c 0x0062a023
+< ^OK$
+> poke 0x10002020 0x00a00313
+< ^OK$
+> poke 0x10002024 0x0062a023
+< ^OK$
+> poke 0x10002028 0x0000006f
 < ^OK$
 > peek 0x30002000 3
-< ^0x30002000: 0x4f0002b7$
-< ^0x30002008: 0x0000006f$
-> go 0x20002000
-< ^jumping to 0x20002000$
+< ^0x30002000: 0x200002b7$
+< ^0x30002008: 0x0062a023$
+> go 0x10002000
+< ^jumping to 0x10002000$
+< ^PASS$

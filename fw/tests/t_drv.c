@@ -56,12 +56,19 @@ static int t_timer(void)
     REG32(MTIMER_BASE + MTIME_HI) = hi + 1;
     CHECK(REG32(MTIMER_BASE + MTIME_HI) >= hi + 1);
     REG32(MTIMER_BASE + MTIME_HI) = hi;
-    uint64_t t0 = timer_now();
-    uint64_t c0 = arch_cycles();
-    while (timer_now() < t0 + 400) ;
-    uint64_t c1 = arch_cycles();
-    uint64_t exp = 400ull * AON_PERIOD_PS / OP2_PERIOD_PS;     /* at OP2 */
-    printf_("    400 ticks: %u cpu cycles (expected about %u)\n", (unsigned)(c1 - c0), (unsigned)exp);
+    /* Warm the I-cache first and measure over the ticks that actually
+     * elapsed between the two samples: a cold miss between reading mtime and
+     * mcycle counted ticks without cycles (found on the in-house SoC). */
+    uint64_t t0, c0, t1, c1;
+    for (int pass = 0; pass < 2; pass++) {
+        t0 = timer_now();
+        c0 = arch_cycles();
+        while ((t1 = timer_now()) < t0 + 1000) ;
+        c1 = arch_cycles();
+    }
+    uint64_t exp = (t1 - t0) * AON_PERIOD_PS / OP2_PERIOD_PS;      /* at OP2 */
+    printf_("    %u ticks: %u cpu cycles (expected about %u)\n", (unsigned)(t1 - t0),
+            (unsigned)(c1 - c0), (unsigned)exp);
     CHECK(c1 - c0 > exp * 9 / 10 && c1 - c0 < exp * 11 / 10);
 #endif
     return TEST_PASS;

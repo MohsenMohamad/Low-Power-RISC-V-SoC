@@ -1,36 +1,53 @@
-# UART monitor session against the application image (boot arg: monitor).
+# UART monitor session against the validation application on the integrated
+# SoC (no host boot argument: the application starts the monitor).
 # '>' = command sent, '<' = regex expected in its response, '!' = must not appear
+< \[ROM\] LPSOC boot ROM 2\.0, reset cause POR$
 < \[APP\] LPSOC firmware, platform lpsoc, cpu rv32m, boot cold
 < monitor ready
 > help
 < ^  peek
 < ^  run
 < ^  sleep
+! ^  reset
 > info
 < ^platform lpsoc, cpu rv32m
-< ^boot cold, rst_cause 1
-> peek pmu.id
-< ^0x4000203c: 0x504d5531$
+< ^boot cold, rst_cause 1, reason 1, cold_boots 1, resumes 0, bad_resumes 0
+< ^opp 2, sleep_cnt 0
+> peek pmu.ctrl
+< ^0x20003000: 0x00000100$
 > peek handoff.rom_version
-< ^0x20000018: 0x00010000$
-> poke 0x20010000 0xcafef00d
+< ^0x10000000: 0x00020000$
+> peek pmu.wake_mask
+< ^0x20003024: 0x00000007$
+# RAM above the application image (cached window), then the uncached alias
+> poke 0x1001a000 0xcafef00d
 < ^OK$
-> peek 0x20010000 2
-< ^0x20010000: 0xcafef00d$
-< ^0x20010004: 0x[0-9a-f]{8}$
-# uncached alias: the poke reached RAM
-> peek 0x30010000
-< ^0x30010000: 0xcafef00d$
-> poke intc.enable 0x24
+> peek 0x1001a000 2
+< ^0x1001a000: 0xcafef00d$
+< ^0x1001a004: 0x[0-9a-f]{8}$
+> peek 0x3001a000
+< ^0x3001a000: 0xcafef00d$
+> poke intc.enable 0x0c
 < ^OK$
 > peek intc.enable
-< ^0x40001004: 0x00000024$
+< ^0x20002004: 0x0000000c$
 > poke intc.enable 0
 < ^OK$
 > regs pmu
-< ^pmu\.id +0x4000203c: 0x504d5531$
-< ^pmu\.rst_cause +0x40002010: 0x00000001$
-> peek 0x20010001
+< ^pmu\.ctrl +0x20003000: 0x00000100$
+< ^pmu\.sleep_cnt +0x2000301c: 0x00000000$
+< ^pmu\.vsel +0x20003020: 0x00000002$
+# register access rules: a write to a read-only register is a bus error
+> poke pmu.sleep_cnt 5
+< ^ERR fault 0x2000301c$
+> peek pmu.sleep_cnt
+< ^0x2000301c: 0x00000000$
+# unmapped: debug range (not implemented), unmapped PMU offset
+> peek 0x20008000
+< ^ERR fault 0x20008000$
+> peek 0x20003040
+< ^ERR fault 0x20003040$
+> peek 0x1001a001
 < ^ERR alignment$
 > peek nosuch.reg
 < ^ERR address$
@@ -38,7 +55,9 @@
 < ^ERR unknown command 'frobnicate'$
 > list
 < ^ +42 pm_sleep_resume
-< ^ +14 exc_access_fault +\(unsupported: accfault\)
+< ^ +14 exc_access_fault *$
+< ^ +2 csr_machine_regs *$
+! unsupported
 > run 10
 < ^\[TEST  10\] exc_ecall +PASS$
 < ^SUITE RESULT: PASS$
@@ -47,34 +66,39 @@
 > run 42
 < ^\[TEST  42\] pm_sleep_resume +PASS$
 > sleep deep 9000
-< ^woke: result 1, rst_cause 3, wake_src 1, off_time [1-9]
-# wake from DEEP_SLEEP by UART RX (intc -> MEIP); the empty line below is
-# the input that wakes the CPU
+< ^woke: result 1, rst_cause 3, wake_cause 2, sleep_cnt \+1$
+# wake from SLEEP / DEEP_SLEEP by UART RX (intc source 0 -> MEIP); the empty
+# line after each command is the input that wakes the CPU
 > sleep sleep uart
 < ^zzz> 
-< ^woke: result 1, rst_cause 2, wake_src 4, off_time [1-9]
+< ^woke: result 1, rst_cause 2, wake_cause 1, sleep_cnt \+1$
 > 
 > sleep deep uart
-< ^woke: result 1, rst_cause 3, wake_src 4
+< ^woke: result 1, rst_cause 3, wake_cause 1, sleep_cnt \+1$
 > 
+> sleep idle 3000
+< ^woke: result 0, rst_cause 3, wake_cause 2, sleep_cnt \+0$
+! ERR
 > info
-> opp 2
-< ^opp 2$
-> info
-< ^opp 2,
+< ^opp 2, sleep_cnt 4
 > opp 0
 < ^opp 0$
+> info
+< ^opp 0,
+> opp 2
+< ^opp 2$
+# resume rejected (bad context CRC): the ROM cold-boots the image; the suite
+# finishes the test after the reboot and the monitor comes back
 > run 45
-< ^\[ROM\] LPSOC boot ROM 1\.0, reset cause SW-RESET$
-< ^\[TEST  45\] pm_sw_reset_cold_boot +PASS \(after reboot\)$
+< ^\[ROM\] LPSOC boot ROM 2\.0, reset cause SLEEP-WAKE, resume rejected: bad context CRC$
+< ^\[TEST  45\] pm_resume_bad_crc_cold_boot +PASS \(after reboot\)$
+< ^monitor ready
 ! FAIL
 > regs handoff
-< ^handoff\.boot_status +0x20000004: 0x00000001$
-< ^handoff\.rst_cause +0x20000008: 0x00000004$
-> reset
-< ^resetting CPU domain$
-< ^\[ROM\] LPSOC boot ROM 1\.0, reset cause SW-RESET$
-< ^monitor ready
+< ^handoff\.boot_status +0x10000004: 0x00000003$
+< ^handoff\.rst_cause +0x10000008: 0x00000002$
+< ^handoff\.boot_reason +0x1000000c: 0x00000005$
 > info
-< ^boot cold, rst_cause 4
+< ^boot cold \(resume rejected\), rst_cause 2, reason 5, cold_boots 2, resumes 4, bad_resumes 1
 > exit 0
+< ^PASS$

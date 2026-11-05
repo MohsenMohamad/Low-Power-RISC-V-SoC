@@ -239,7 +239,11 @@ module tb_soc #(
     if ($value$plusargs("uart_in=%s", f)) begin
       fd = $fopen(f, "rb");
       if (fd == 0) $fatal(1, "[tb] cannot open %s", f);
-      while ((c = $fgetc(fd)) != -1) rx_buf.push_back(byte'(c));
+      c = $fgetc(fd);
+      while (c != -1) begin       // (no assignment in the condition: Icarus)
+        rx_buf.push_back(c[7:0]);
+        c = $fgetc(fd);
+      end
       $fclose(fd);
     end
   end
@@ -250,7 +254,6 @@ module tb_soc #(
     forever begin
       @(posedge clk_aon);
       if (rx_buf.size() != 0 && prompt_seen && rx_hold == 0) begin
-        prompt_seen = 1'b0;
         do begin
           b = rx_buf.pop_front();
           uart_rx = 1'b0;                                   // start bit
@@ -262,6 +265,7 @@ module tb_soc #(
           uart_rx = 1'b1;                                   // stop bit + gap
           repeat (5 * UART_DIV) @(posedge clk_aon);
         end while (b != 8'h0A && rx_buf.size() != 0);
+        prompt_seen = 1'b0;     // a prompt printed while the line was sent is not a new request
       end
     end
   end

@@ -191,7 +191,11 @@ static int t_wfi_wake(void)
     mti_count = 0;
     irq_off();
     arch_irq_enable(IRQ_MTI);
-    uint64_t due = timer_now() + 400;
+    /* The deadline must lie beyond the WFI: from a cold I-cache the code up to
+     * the WFI takes ~750 mtime ticks on the SoC (every line refill crosses the
+     * CDC bridge as four single-beat reads), so a 400-tick deadline expired
+     * before the WFI and the WFI fell through (found on the in-house SoC). */
+    uint64_t due = timer_now() + 4000;
     timer_set_cmp(due);
     int n = 0;
     while (timer_now() < due && n < 1000) { pm_wfi(); n++; }

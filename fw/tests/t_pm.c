@@ -314,11 +314,17 @@ static int t_dvfs_freq(void)
     uint32_t meas_prev = 0;
     for (uint32_t op = 0; op < PMU_NUM_OPP; op++) {
         CHECK_EQ(pm_set_opp(op), 0);
-        /* warm up the I$ so neither end of the window includes a refill */
-        (void)timer_now(); (void)arch_cycles();
-        uint64_t m0 = timer_now(), c0 = arch_cycles(), m1;
-        while ((m1 = timer_now()) < m0 + 3000) ;
-        uint64_t c1 = arch_cycles();
+        /* Two passes: the first warms the I-cache, so neither end of the
+         * measured window includes a line refill (on the SoC a refill crosses
+         * the CDC bridge; a refill between the mtime and the mcycle sample
+         * skewed the ratio by ~2 % at OP0). Both ends run the same code. */
+        uint64_t m0 = 0, c0 = 0, m1 = 0, c1 = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            m0 = timer_now();
+            c0 = arch_cycles();
+            while ((m1 = timer_now()) < m0 + 10000) ;
+            c1 = arch_cycles();
+        }
         uint32_t meas = (uint32_t)((c1 - c0) * 1000u / (m1 - m0));
         uint32_t exp  = (uint32_t)((uint64_t)AON_PERIOD_PS * 1000u / per[op]);
         printf_("    OP%u: %u.%03u cpu cycles per mtime tick (expected %u.%03u)\n", (unsigned)op,

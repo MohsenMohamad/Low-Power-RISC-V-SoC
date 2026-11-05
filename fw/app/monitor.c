@@ -33,7 +33,8 @@ static const reg_t intc_regs[] = {
 static const reg_t pmu_regs[] = {
     {"ctrl", PMU_CTRL}, {"status", PMU_STATUS}, {"dvfs", PMU_DVFS}, {"irq_en", PMU_IRQ_EN},
     {"scratch0", PMU_SCRATCH0}, {"scratch1", PMU_SCRATCH1}, {"wake_cause", PMU_WAKE_CAUSE},
-    {"sleep_cnt", PMU_SLEEP_CNT}, {"vsel", PMU_VSEL},
+    {"sleep_cnt", PMU_SLEEP_CNT}, {"vsel", PMU_VSEL}, {"wake_mask", PMU_WAKE_MASK},
+    {"idle_cnt", PMU_IDLE_CNT},
 };
 static const reg_t timer_regs[] = {
     {"mtime", TIMER_MTIME}, {"mtimeh", TIMER_MTIME + 4}, {"mtimecmp", TIMER_MTIMECMP},
