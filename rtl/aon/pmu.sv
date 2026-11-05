@@ -139,7 +139,8 @@ module pmu #(
   logic [1:0]  target_op_q;
   logic [1:0]  cur_op_q;
   logic [1:0]  vsel_q;
-  logic        dvfs_pend_q;
+  logic        dvfs_pend;
+  logic [1:0]  seq_op_q;     // target latched for the running DVFS sequence
   logic        irq_en_q;
   logic        st_resume_q, st_resume_deep_q, st_dvfs_done_q, st_err_dirty_q;
   logic [31:0] scratch0_q, scratch1_q;
@@ -153,11 +154,18 @@ module pmu #(
   // ---------------------------------------------------------------------------
   // Next-state logic
   // ---------------------------------------------------------------------------
+  // A DVFS change is pending whenever the requested and current points
+  // differ. The sequence works on seq_op_q (latched when it starts), so a
+  // DVFS register write while a sequence runs cannot break the
+  // voltage-before-frequency ordering; it simply triggers another sequence.
+  assign dvfs_pend = (target_op_q != cur_op_q);
+
+  // Voltage needed while switching: the higher of the current and new point.
   logic [1:0] vup_level;
   assign vup_level = (target_op_q > cur_op_q) ? target_op_q : cur_op_q;
 
-  logic [NUM_OP-1:0] target_onehot;
-  assign target_onehot = NUM_OP'(1) << target_op_q;
+  logic [NUM_OP-1:0] seq_onehot;
+  assign seq_onehot = NUM_OP'(1) << seq_op_q;
 
   always_comb begin
     state_d = state_q;
@@ -174,12 +182,12 @@ module pmu #(
           else                         state_d = ST_BUS_DRAIN;
         end
       ST_IDLE:
-        if (dvfs_pend_q) state_d = ST_DVFS_VUP;
+        if (dvfs_pend) state_d = ST_DVFS_VUP;
         else if (wake)   state_d = ST_CLK_UNGATE;
       ST_DVFS_VUP:
         if (!vwait_q || cnt_q >= 16'(VSETTLE_CYCLES)) state_d = ST_DVFS_SWITCH;
       ST_DVFS_SWITCH:
-        if (dvfs_active_i == target_onehot) state_d = ST_DVFS_VDN;
+        if (dvfs_active_i == seq_onehot) state_d = ST_DVFS_VDN;
       ST_DVFS_VDN:
         if (!vwait_q || cnt_q >= 16'(VSETTLE_CYCLES)) state_d = ST_IDLE;
       ST_BUS_DRAIN:
@@ -239,6 +247,7 @@ module pmu #(
       cur_op_q    <= RESET_OP;
       mode_lat_q  <= MODE_IDLE;
       vwait_q     <= 1'b0;
+      seq_op_q    <= RESET_OP;
     end else begin
       state_q <= state_d;
       cnt_q   <= cnt_clr ? 16'd0 : ((cnt_q == 16'hFFFF) ? cnt_q : cnt_q + 16'd1);
@@ -250,14 +259,15 @@ module pmu #(
         end
         ST_CLK_GATE:    cg_en_q <= 1'b0;
         ST_DVFS_VUP: if (state_q != ST_DVFS_VUP) begin
-          vsel_q  <= vup_level;
-          vwait_q <= (vup_level != vsel_q);
+          vsel_q   <= vup_level;
+          vwait_q  <= (vup_level != vsel_q);
+          seq_op_q <= target_op_q;
         end
-        ST_DVFS_SWITCH: dvfs_sel_q <= target_op_q;
+        ST_DVFS_SWITCH: dvfs_sel_q <= seq_op_q;
         ST_DVFS_VDN: if (state_q != ST_DVFS_VDN) begin
-          vsel_q   <= target_op_q;
-          cur_op_q <= target_op_q;
-          vwait_q  <= (target_op_q != vsel_q);
+          vsel_q   <= seq_op_q;
+          cur_op_q <= seq_op_q;
+          vwait_q  <= (seq_op_q != vsel_q);
         end
         ST_ISO_ON: begin
           iso_en_q    <= 1'b1;
@@ -303,7 +313,6 @@ module pmu #(
       mode_q           <= MODE_IDLE;
       lp_en_q          <= 1'b1;
       target_op_q      <= RESET_OP;
-      dvfs_pend_q      <= 1'b0;
       irq_en_q         <= 1'b0;
       st_resume_q      <= 1'b0;
       st_resume_deep_q <= 1'b0;
@@ -317,7 +326,6 @@ module pmu #(
       // hardware events
       if (state_q == ST_DVFS_VDN && state_d == ST_IDLE) begin
         st_dvfs_done_q <= 1'b1;
-        dvfs_pend_q    <= 1'b0;
       end
       if ((state_q == ST_IDLE && state_d == ST_CLK_UNGATE) ||
           (state_q == ST_OFF  && state_d != ST_OFF))
@@ -343,11 +351,8 @@ module pmu #(
             if (wdata_i[19]) st_err_dirty_q   <= 1'b0;
           end
           10'h2: begin
-            // Target may only change while no DVFS sequence can be running
-            // (the CPU is executing, so the PMU is in RUN).
             if (wdata_i[1:0] < 2'(NUM_OP)) begin
               target_op_q <= wdata_i[1:0];
-              dvfs_pend_q <= (wdata_i[1:0] != cur_op_q);
             end
           end
           10'h3: irq_en_q   <= wdata_i[0];
@@ -370,7 +375,7 @@ module pmu #(
     case (addr_i[11:2])
       10'h0: rdata_o = {23'b0, lp_en_q, 6'b0, mode_q};
       10'h1: rdata_o = {12'b0, st_err_dirty_q, st_dvfs_done_q, st_resume_deep_q, st_resume_q,
-                        5'b0, dvfs_pend_q, cur_op_q, 3'b0, state_q};
+                        5'b0, dvfs_pend, cur_op_q, 3'b0, state_q};
       10'h2: rdata_o = {30'b0, target_op_q};
       10'h3: rdata_o = {31'b0, irq_en_q};
       10'h4: rdata_o = scratch0_q;
@@ -422,6 +427,36 @@ module pmu #(
                   idle_req_q)
   // Leaving the domain powered and unisolated implies RUN-type states.
   `SVA_ASSERT_IMP(a_run_clk_on, clk_i, rst_ni, state_q == ST_RUN, cg_en_q && !iso_en_q && pwr_sw_en_q)
+
+  // Per-state control outputs {sw_en, iso_en, rst_n, cg_en, ret} (the full
+  // sequencing contract; also the inductive invariant for the formal proof).
+  logic [4:0] ctl;
+  assign ctl = {pwr_sw_en_q, iso_en_q, cpu_rst_n_q, cg_en_q, ram_ret_q};
+  `SVA_ASSERT_IMP(a_ctl_run,      clk_i, rst_ni, state_q == ST_RUN || state_q == ST_IDLE_REQ ||
+                                  state_q == ST_CLK_UNGATE || state_q == ST_WAKE_REL, ctl == 5'b10110)
+  `SVA_ASSERT_IMP(a_ctl_gated,    clk_i, rst_ni, (state_q == ST_CLK_GATE || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_OFF), ctl == 5'b10100)
+  `SVA_ASSERT_IMP(a_ctl_iso,      clk_i, rst_ni, state_q == ST_ISO_ON || state_q == ST_PWR_ON ||
+                                  state_q == ST_RST_CLK_OFF, ctl == 5'b11000)
+  `SVA_ASSERT_IMP(a_ctl_off,      clk_i, rst_ni, state_q == ST_PWR_OFF || state_q == ST_RET_EXIT,
+                                  ctl == 5'b01000)
+  `SVA_ASSERT_IMP(a_ctl_off_ret,  clk_i, rst_ni, state_q == ST_OFF,
+                                  ctl == {4'b0100, mode_lat_q == MODE_DEEP})
+  `SVA_ASSERT_IMP(a_ctl_rstclk,   clk_i, rst_ni, state_q == ST_RST_CLK_ON, ctl == 5'b11010)
+  `SVA_ASSERT_IMP(a_ctl_rstrel,   clk_i, rst_ni, state_q == ST_RST_REL, ctl == 5'b11100)
+  `SVA_ASSERT_IMP(a_req_idle,     clk_i, rst_ni, (state_q == ST_IDLE_REQ || state_q == ST_CLK_GATE || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_ON),
+                                  idle_req_q)
+  `SVA_ASSERT_IMP(a_req_off,      clk_i, rst_ni, (state_q == ST_RUN || state_q == ST_PWR_OFF || state_q == ST_OFF || state_q == ST_RET_EXIT || state_q == ST_PWR_ON || state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF || state_q == ST_RST_REL || state_q == ST_ISO_OFF || state_q == ST_WAKE_REL), !idle_req_q)
+  // DVFS bookkeeping: outside a sequence the mux and regulator sit at cur_op.
+  `SVA_ASSERT(a_op_range,         clk_i, rst_ni, cur_op_q < 2'(NUM_OP) && seq_op_q < 2'(NUM_OP) &&
+                                  target_op_q < 2'(NUM_OP) && vsel_q < 2'(NUM_OP))
+  `SVA_ASSERT_IMP(a_dvfs_idle,    clk_i, rst_ni, !(state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN),
+                                  dvfs_sel_q == cur_op_q && vsel_q == cur_op_q)
+  `SVA_ASSERT_IMP(a_dvfs_vup,     clk_i, rst_ni, state_q == ST_DVFS_VUP,
+                                  dvfs_sel_q == cur_op_q && vsel_q >= seq_op_q && vsel_q >= cur_op_q)
+  `SVA_ASSERT_IMP(a_dvfs_switch,  clk_i, rst_ni, state_q == ST_DVFS_SWITCH,
+                                  dvfs_sel_q == seq_op_q && vsel_q >= seq_op_q && vsel_q >= cur_op_q)
+  `SVA_ASSERT_IMP(a_dvfs_vdn,     clk_i, rst_ni, state_q == ST_DVFS_VDN,
+                                  dvfs_sel_q == seq_op_q && cur_op_q == seq_op_q && vsel_q == seq_op_q)
 
   // Transition coverage (every FSM arc).
   `SVA_COVER(c_run_idlereq,      clk_i, rst_ni, state_q == ST_RUN         && state_d == ST_IDLE_REQ)

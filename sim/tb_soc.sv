@@ -247,6 +247,63 @@ module tb_soc #(
     endcase
   endfunction
 
+  // ---------------- power-state latency measurement ----------------
+  // Entry: WFI retired in the core (wfi_q rises, PD_CPU clock) -> PMU reaches
+  //        IDLE (clock gated) / OFF (switch off, isolated, reset).
+  // Wake:  wake event seen by the PMU in IDLE/OFF -> PMU back in RUN.
+  // Index: 0 IDLE, 1 SLEEP, 2 DEEP_SLEEP
+  realtime t_wfi, t_wake;
+  realtime lat_ent_min [3], lat_ent_max [3], lat_ent_sum [3];
+  realtime lat_wak_min [3], lat_wak_max [3], lat_wak_sum [3];
+  int      lat_ent_n [3], lat_wak_n [3];
+  int      lp_kind;
+  always @(posedge dut.u_pd_cpu.u_core.wfi_q)
+    if (dut.pd_cpu_supply_on && dut.cpu_rst_n) t_wfi = $realtime;  // ignore corruption events
+
+  task automatic lat_add(input bit wake, input int k, input realtime d);
+    if (!wake) begin
+      if (lat_ent_n[k] == 0 || d < lat_ent_min[k]) lat_ent_min[k] = d;
+      if (lat_ent_n[k] == 0 || d > lat_ent_max[k]) lat_ent_max[k] = d;
+      lat_ent_sum[k] += d; lat_ent_n[k]++;
+    end else begin
+      if (lat_wak_n[k] == 0 || d < lat_wak_min[k]) lat_wak_min[k] = d;
+      if (lat_wak_n[k] == 0 || d > lat_wak_max[k]) lat_wak_max[k] = d;
+      lat_wak_sum[k] += d; lat_wak_n[k]++;
+    end
+  endtask
+
+  always @(posedge clk_aon) if (checks_on) begin
+    // entries (only the first IDLE entry of an episode, not the return from DVFS)
+    if (dut.u_aon.u_pmu.state_q == 5'd2 && dut.u_aon.u_pmu.state_d == 5'd3) begin
+      lat_add(1'b0, 0, $realtime - t_wfi); lp_kind = 0;
+    end
+    if (dut.u_aon.u_pmu.state_q == 5'd9 && dut.u_aon.u_pmu.state_d == 5'd10) begin
+      lp_kind = (dut.u_aon.u_pmu.mode_lat_q == 2'd2) ? 2 : 1;
+      lat_add(1'b0, lp_kind, $realtime - t_wfi);
+    end
+    // wake event accepted
+    if ((dut.u_aon.u_pmu.state_q == 5'd3 && dut.u_aon.u_pmu.state_d == 5'd17) ||
+        (dut.u_aon.u_pmu.state_q == 5'd10 && dut.u_aon.u_pmu.state_d != 5'd10))
+      t_wake = $realtime;
+    if (dut.u_aon.u_pmu.state_q == 5'd18 && dut.u_aon.u_pmu.state_d == 5'd0 && t_wake > 0) begin
+      lat_add(1'b1, lp_kind, $realtime - t_wake);
+      t_wake = 0;
+    end
+  end
+
+  task automatic latency_report(input int fd);
+    $fdisplay(fd, "== Power-state latency (ns): clk_aon 41 ns, clk_cpu OP0/1/2 47/23/11 ns ==");
+    for (int k = 0; k < 3; k++) begin
+      if (lat_ent_n[k] > 0)
+        $fdisplay(fd, "  %-10s entry  (WFI retired -> %s)  n=%0d min=%0.0f max=%0.0f avg=%0.0f",
+                  psn(k + 1), k == 0 ? "clock gated" : "power off  ", lat_ent_n[k],
+                  lat_ent_min[k], lat_ent_max[k], lat_ent_sum[k] / lat_ent_n[k]);
+      if (lat_wak_n[k] > 0)
+        $fdisplay(fd, "  %-10s wake   (wake event -> PMU RUN)       n=%0d min=%0.0f max=%0.0f avg=%0.0f",
+                  psn(k + 1), lat_wak_n[k], lat_wak_min[k], lat_wak_max[k], lat_wak_sum[k] / lat_wak_n[k]);
+    end
+  endtask
+
   int arc_hits [NARC];
   int illegal_arcs;
   int ps_hits [4][4];
@@ -316,6 +373,7 @@ module tb_soc #(
           if (op_hits[f][t] == 0) missing++;
         end
     $fdisplay(fd, "  PD_CPU corruption events: %0d", n_corrupt);
+    latency_report(fd);
     return missing;
   endfunction
 
