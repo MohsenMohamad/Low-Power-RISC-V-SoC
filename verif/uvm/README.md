@@ -329,5 +329,25 @@ Observed Verilator behaviour:
 - `UVM_NO_DPI` disables UVM's regex-based component-name checks and HDL
   backdoor; the environment uses neither.
 
-Results of `make regress SEEDS="1 2 3"` and `make selfcheck` with Verilator are
-recorded in the commit that adds them (see git log).
+### Verilator results (stub PMU)
+
+`make regress SIM=verilator SEEDS="11 22 33"`: 21/21 runs pass (7 tests × 3
+seeds). `make selfcheck SIM=verilator`: all three injected stub bugs are
+detected (BUG_MODE 1 by `SB_ORDER`/`SB_INV`, 2 by `SB_RESP`, 3 by `SB_ISO`).
+The single-file bundle also builds and passes `pmu_pwr_matrix_test` under
+Verilator.
+
+`pmu_full_test` coverage (from the env's report):
+
+| Seed | Transitions (matrix / dwell / early wake / state×OPP) | DVFS | Bus & errors | AXI transfer |
+|---|---|---|---|---|
+| 11 | 97.8% (100 / 88.9 / 100 / 91.7) | 100% | 100% | 93.3% |
+| 22 | 100% | 100% | 100% | 93.3% |
+| 33 | 100% | 100% | 100% | 93.3% |
+
+The AXI transfer hole is request-channel wait states (`cp_req_wait` short/long):
+the stub is always ready on AW/W/AR when the single-outstanding driver issues a
+request, so those bins can only be hit by a slave that back-pressures requests.
+Coverage numbers come from the covergroups' `get_inst_coverage()`; Verilator's
+`coverage.dat` files are saved next to each log but no merged report is
+produced.

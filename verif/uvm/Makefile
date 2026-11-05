@@ -27,17 +27,17 @@ run:
 	$(SCRIPT) -t $(TEST) -s $(SEED) -b $(BUG) -- $(PLUSARGS)
 
 regress:
-	@fail=0; for t in $(TESTS); do for s in $(SEEDS); do \
-	  $(SCRIPT) -t $$t -s $$s -- $(PLUSARGS) || fail=$$((fail+1)); \
+	@fail=0; c=-c; for t in $(TESTS); do for s in $(SEEDS); do \
+	  $(SCRIPT) $$c -t $$t -s $$s -- $(PLUSARGS) || fail=$$((fail+1)); c=; \
 	done; done; \
 	echo "regression: $$fail failing run(s)"; test $$fail -eq 0
 
 # Each injected stub bug must be caught (the run must FAIL).
 selfcheck:
 	@ok=0; for b in 1 2 3; do \
-	  if $(SCRIPT) -t pmu_full_test -s 1 -b $$b > /dev/null 2>&1; then \
-	    echo "selfcheck: BUG_MODE=$$b NOT detected"; ok=1; \
-	  else echo "selfcheck: BUG_MODE=$$b detected"; fi; \
+	  out=$$($(SCRIPT) -c -t pmu_full_test -s 1 -b $$b 2>&1); \
+	  if echo "$$out" | grep -q "TEST FAILED"; then echo "selfcheck: BUG_MODE=$$b detected"; \
+	  else echo "selfcheck: BUG_MODE=$$b NOT detected (or did not run)"; ok=1; fi; \
 	done; test $$ok -eq 0
 
 bundle:
