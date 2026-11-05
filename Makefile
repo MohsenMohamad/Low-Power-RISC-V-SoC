@@ -86,7 +86,8 @@ lint-soc:
 	@echo "== SoC lint clean =="
 
 lint-cpu:
-	$(VERILATOR) --lint-only -Wall --top-module cpu_top $(CPU_SRCS)
+	$(VERILATOR) --lint-only -Wall -Irtl/include --top-module cpu_top $(CPU_SRCS)
+	$(VERILATOR) --lint-only -Wall -Irtl/include -DSVA_ON --assert --top-module cpu_top $(VLT_SVA) $(CPU_SRCS)
 	@echo "== CPU lint clean =="
 
 # ------------------------------------------------------------------ firmware
@@ -158,7 +159,7 @@ cosim-build: $(COSIM_BIN)
 $(COSIM_BIN): $(CPU_SRCS) dv/cosim/cpu_cov.sv dv/cosim/tb_main.cpp dv/cosim/spike_cosim.cpp \
               dv/cosim/spike_cosim.h dv/cosim/isa_cov.h dv/common/axil_mem.h dv/common/elf32.h
 	@mkdir -p $(BUILD)/cosim/obj
-	$(VERILATOR) --cc --exe --build -O2 -Wno-fatal --assert -j $(JOBS) --coverage --top-module cpu_top \
+	$(VERILATOR) --cc --exe --build -O2 -Wno-fatal --assert -DSVA_ON -Irtl/include -j $(JOBS) --coverage --top-module cpu_top \
 	  -GRAM_BASE=32\'h80000000 -GRAM_MASK=32\'hFFC00000 -Mdir $(BUILD)/cosim/obj \
 	  $(CPU_SRCS) dv/cosim/cpu_cov.sv dv/cosim/tb_main.cpp dv/cosim/spike_cosim.cpp \
 	  -CFLAGS "-O2 -std=c++17 -I$(SPIKE_PREFIX)/include -I$(CURDIR)/dv/cosim" \

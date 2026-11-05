@@ -7,6 +7,7 @@
 //
 // All inputs are synchronous to clk. Asynchronous SoC signals are synchronized
 // once, in pd_cpu, before they reach this module (doc/CPU_SOC_INTERFACE.md).
+`include "sva_macros.svh"
 module cpu_top #(
   parameter logic [31:0] ROM_BASE = 32'h0000_0000,
   parameter logic [31:0] ROM_MASK = 32'hFFFF_C000,  // 16 KB
@@ -182,13 +183,8 @@ module cpu_top #(
   assign core_sleep_o  = core_sleep_q;
   assign cache_clean_o = dc_clean;
 
-`ifndef SYNTHESIS
-`ifndef VERILATOR_LINT_ONLY
-  // An acknowledged core stays in WFI with no bus activity.
-  a_ack_quiescent: assert property (@(posedge clk) disable iff (!rst_n)
-    idle_ack_q |-> quiescent && !m_arvalid && !m_awvalid && !m_wvalid)
-    else $error("idle_ack asserted while the CPU is not quiescent");
-`endif
-`endif
+  // An acknowledged core stays in WFI with no bus activity (SVA_ON builds).
+  `SVA_ASSERT_IMP(a_ack_quiescent, clk, rst_n, idle_ack_q,
+                  quiescent && !m_arvalid && !m_awvalid && !m_wvalid)
 
 endmodule
