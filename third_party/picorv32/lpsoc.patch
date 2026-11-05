@@ -1,0 +1,22 @@
+--- a/picorv32.v
++++ b/picorv32.v
+@@ -156,7 +156,10 @@
+ 
+ 	// Trace Interface
+ 	output reg        trace_valid,
+-	output reg [35:0] trace_data
++	output reg [35:0] trace_data,
++
++	// LPSOC PATCH: core is stalled in waitirq (used as WFI by the PMU)
++	output            wfi
+ );
+ 	localparam integer irq_timer = 0;
+ 	localparam integer irq_ebreak = 1;
+@@ -1217,6 +1220,7 @@
+ 
+ 	reg [31:0] next_irq_pending;
+ 	reg do_waitirq;
++	assign wfi = do_waitirq; // LPSOC PATCH
+ 
+ 	reg [31:0] alu_out, alu_out_q;
+ 	reg alu_out_0, alu_out_0_q;

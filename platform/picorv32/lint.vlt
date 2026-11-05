@@ -1,0 +1,3 @@
+`verilator_config
+// Third-party core: not our code, warnings waived wholesale.
+lint_off -file "*/third_party/picorv32/*"
