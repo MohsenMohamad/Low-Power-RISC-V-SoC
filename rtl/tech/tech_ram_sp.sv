@@ -13,7 +13,7 @@
 module tech_ram_sp #(
   parameter int    WORDS     = 1024,
   parameter int    AW        = $clog2(WORDS),
-  parameter string INIT_FILE = ""
+  parameter INIT_FILE = ""
 ) (
   input  logic          clk_i,
   input  logic          rst_ni,     // used by assertions only

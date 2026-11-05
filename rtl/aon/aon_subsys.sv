@@ -13,7 +13,7 @@
 //   0 UART, 1 wake timer, 2 PMU (DVFS done), 3 external wake pin, 7:4 spare
 // -----------------------------------------------------------------------------
 module aon_subsys #(
-  parameter string ROM_INIT       = "",
+  parameter ROM_INIT       = "",
   parameter int    VSETTLE_CYCLES = 8,
   parameter int    RET_CYCLES     = 4,
   parameter int    ISO_CYCLES     = 2,

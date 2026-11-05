@@ -25,7 +25,7 @@
 //   ext_wake_i, uart_rx_i  async -> clk_aon     tech_sync in u_aon
 // -----------------------------------------------------------------------------
 module soc_top #(
-  parameter string ROM_INIT       = "",
+  parameter ROM_INIT       = "",
   parameter int    VSETTLE_CYCLES = 8,
   parameter int    RET_CYCLES     = 4,
   parameter int    ISO_CYCLES     = 2,

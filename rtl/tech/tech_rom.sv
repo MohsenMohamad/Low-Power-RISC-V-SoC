@@ -8,7 +8,7 @@
 module tech_rom #(
   parameter int    WORDS     = 4096,
   parameter int    AW        = $clog2(WORDS),
-  parameter string INIT_FILE = ""
+  parameter INIT_FILE = ""
 ) (
   input  logic          clk_i,
   input  logic          cs_i,

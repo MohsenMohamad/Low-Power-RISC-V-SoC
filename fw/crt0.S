@@ -13,6 +13,11 @@
   .section .text.start, "ax"
   .globl _start
 _start:
+  /* Registers are undefined after reset / power-up: clear them so no
+   * undefined value can ever be stored or used (deterministic boot). */
+  .irp r,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+  li    x\r, 0
+  .endr
   li    t0, PMU_BASE
   lw    t1, PMU_STATUS(t0)
   li    t2, PMU_ST_RESUME

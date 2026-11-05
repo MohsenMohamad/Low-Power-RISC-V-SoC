@@ -48,30 +48,45 @@ def blocking_names(mod):
     blocking assignment too: Verilator rejects mixing '=' and '<=' on one
     variable. All other state is corrupted with a non-blocking assignment.
     """
+    text = module_text(mod)
+    return set(re.findall(r"\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)?=(?!=)", text))
+
+
+def module_text(mod):
     src = mod.get("attributes", {}).get("src", "")
     m = re.match(r"(.*):(\d+)\.\d+-(\d+)\.\d+$", src)
     if not m:
-        return set()
+        return ""
     fname, first, last = m.group(1), int(m.group(2)), int(m.group(3))
     if fname not in _src_cache:
         try:
             _src_cache[fname] = open(fname).read().splitlines()
         except OSError:
             _src_cache[fname] = []
-    text = "\n".join(_src_cache[fname][first - 1:last])
-    return set(re.findall(r"\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)?=(?!=)", text))
+    return "\n".join(_src_cache[fname][first - 1:last])
+
+
+def wire_names(mod):
+    """Names declared as nets ('wire'): aliases of state, never written."""
+    names = set()
+    for decl in re.findall(r"\bwire\b([^;]*);", module_text(mod)):
+        decl = re.sub(r"\[[^\]]*\]", " ", decl.split("=")[0])
+        names.update(re.findall(r"[A-Za-z_]\w*", decl))
+    return names
 
 
 def collect(modules, mod_name, path, out):
     mod = modules[mod_name]
     netnames = mod["netnames"]
     blk = blocking_names(mod)
+    wires = wire_names(mod)
     ports = set(mod.get("ports", {}))
     # A flop output bit can carry several names (e.g. "x_q" and the port "x_o"
-    # driven by "assign x_o = x_q"). Prefer the internal variable, because a
-    # continuously-assigned port net cannot be written procedurally.
+    # driven by "assign x_o = x_q", or a debug "wire d = x"). Prefer the
+    # variable, because a continuously-assigned net cannot be written.
     bit2net = {}
-    for n, nv in sorted(netnames.items(), key=lambda kv: (kv[0] in ports, len(kv[0]), kv[0])):
+    for n, nv in sorted(netnames.items(),
+                        key=lambda kv: (kv[0] in wires, kv[0] in ports, len(kv[0]), kv[0])):
         if n.startswith("$") or nv.get("hide_name"):
             continue
         for idx, b in enumerate(nv["bits"]):

@@ -9,7 +9,7 @@
 module aon_mem #(
   parameter bit    IS_ROM    = 1'b0,
   parameter int    BYTES     = 16384,
-  parameter string INIT_FILE = ""
+  parameter INIT_FILE = ""
 ) (
   input  logic                       clk_i,
   input  logic                       rst_ni,

@@ -169,8 +169,10 @@ module pmu #(
         if (idle_ack_i)         state_d = ST_CLK_GATE;
         else if (!core_sleep_i) state_d = ST_WAKE_REL;      // core left WFI
       ST_CLK_GATE:
-        if (!cg_ack_i)
-          state_d = (mode_lat_q == MODE_IDLE) ? ST_IDLE : ST_BUS_DRAIN;
+        if (!cg_ack_i) begin
+          if (mode_lat_q == MODE_IDLE) state_d = ST_IDLE;
+          else                         state_d = ST_BUS_DRAIN;
+        end
       ST_IDLE:
         if (dvfs_pend_q) state_d = ST_DVFS_VUP;
         else if (wake)   state_d = ST_CLK_UNGATE;
@@ -188,11 +190,17 @@ module pmu #(
       ST_PWR_OFF:
         if (!pwr_good_i) state_d = ST_OFF;
       ST_OFF:
-        if (wake) state_d = ram_ret_o ? ST_RET_EXIT : ST_PWR_ON;
+        if (wake) begin
+          if (ram_ret_o) state_d = ST_RET_EXIT;
+          else           state_d = ST_PWR_ON;
+        end
       ST_RET_EXIT:
         if (cnt_q >= 16'(RET_CYCLES)) state_d = ST_PWR_ON;
       ST_PWR_ON:
-        if (pwr_good_i) state_d = (RST_CLK_CYCLES > 0) ? ST_RST_CLK_ON : ST_RST_REL;
+        if (pwr_good_i) begin
+          if (RST_CLK_CYCLES > 0) state_d = ST_RST_CLK_ON;
+          else                    state_d = ST_RST_REL;
+        end
       ST_RST_CLK_ON:
         if (cg_ack_i && cnt_q >= 16'(RST_CLK_CYCLES)) state_d = ST_RST_CLK_OFF;
       ST_RST_CLK_OFF:

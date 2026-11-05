@@ -32,8 +32,8 @@
 `endif
 
 module tb_soc #(
-  parameter string ROM_INIT       = "build/fw/pm_test.hex",
-  parameter string COV_FILE       = "build/sim/coverage.txt",
+  parameter ROM_INIT       = "build/fw/pm_test.hex",
+  parameter COV_FILE       = "build/sim/coverage.txt",
   parameter int    EXT_WAKE_DELAY = 3000
 );
   // ---------------- clocks / reset ----------------
@@ -170,17 +170,19 @@ module tb_soc #(
   endtask
 
   // AON-side state and the isolated PD_CPU outputs must never be unknown.
+  // (Written as "^(vec) !== 1'bx": Icarus' $isunknown misreports on
+  // concatenations of hierarchical references.)
   always @(posedge clk_aon) if (checks_on) begin
-    chk(!$isunknown({dut.u_aon.u_pmu.state_q, dut.iso_en, dut.pwr_sw_en, dut.cg_en,
+    chk(((^({dut.u_aon.u_pmu.state_q, dut.iso_en, dut.pwr_sw_en, dut.cg_en,
                      dut.cpu_rst_req_n, dut.idle_req, dut.dvfs_sel, dut.vsel_o,
-                     dut.u_aon.ram_ret}), "unknown PMU control");
-    chk(!$isunknown({dut.a_awvalid, dut.a_wvalid, dut.a_arvalid, dut.a_bready, dut.a_rready,
+                     dut.u_aon.ram_ret})) !== 1'bx), "unknown PMU control");
+    chk(((^({dut.a_awvalid, dut.a_wvalid, dut.a_arvalid, dut.a_bready, dut.a_rready,
                      dut.a_awready, dut.a_wready, dut.a_arready, dut.a_bvalid, dut.a_rvalid,
-                     dut.bus_idle}), "unknown AON bus handshake");
-    if (dut.a_awvalid) chk(!$isunknown(dut.a_awaddr), "unknown AON awaddr");
-    if (dut.a_wvalid)  chk(!$isunknown({dut.a_wdata, dut.a_wstrb}), "unknown AON wdata");
-    if (dut.a_arvalid) chk(!$isunknown(dut.a_araddr), "unknown AON araddr");
-    chk(!$isunknown({dut.s_idle_ack, dut.s_core_sleep, dut.s_cache_clean}), "unknown core status");
+                     dut.bus_idle})) !== 1'bx), "unknown AON bus handshake");
+    if (dut.a_awvalid) chk(((^(dut.a_awaddr)) !== 1'bx), "unknown AON awaddr");
+    if (dut.a_wvalid)  chk(((^({dut.a_wdata, dut.a_wstrb})) !== 1'bx), "unknown AON wdata");
+    if (dut.a_arvalid) chk(((^(dut.a_araddr)) !== 1'bx), "unknown AON araddr");
+    chk(((^({dut.s_idle_ack, dut.s_core_sleep, dut.s_cache_clean})) !== 1'bx), "unknown core status");
     // isolation invariant
     if (!dut.pd_cpu_supply_on) chk(dut.iso_en === 1'b1, "PD_CPU supply off without isolation");
     // RAM periphery is off in retention: no access
@@ -188,11 +190,11 @@ module tb_soc #(
   end
 
   always @(posedge dut.clk_cpu) if (checks_on && dut.cpu_rst_n) begin
-    chk(!$isunknown({dut.i_awvalid, dut.i_wvalid, dut.i_arvalid, dut.i_bready, dut.i_rready}),
+    chk(((^({dut.i_awvalid, dut.i_wvalid, dut.i_arvalid, dut.i_bready, dut.i_rready})) !== 1'bx),
         "unknown isolated PD_CPU handshake");
-    if (dut.i_awvalid) chk(!$isunknown(dut.i_awaddr), "unknown isolated awaddr");
-    if (dut.i_wvalid)  chk(!$isunknown({dut.i_wdata, dut.i_wstrb}), "unknown isolated wdata");
-    if (dut.i_arvalid) chk(!$isunknown(dut.i_araddr), "unknown isolated araddr");
+    if (dut.i_awvalid) chk(((^(dut.i_awaddr)) !== 1'bx), "unknown isolated awaddr");
+    if (dut.i_wvalid)  chk(((^({dut.i_wdata, dut.i_wstrb})) !== 1'bx), "unknown isolated wdata");
+    if (dut.i_arvalid) chk(((^(dut.i_araddr)) !== 1'bx), "unknown isolated araddr");
     chk(dut.i_trap !== 1'b1, "CPU trap");
   end
 
@@ -204,56 +206,82 @@ module tb_soc #(
 `endif
 
   // ---------------- power-state transition coverage ----------------
-  // PMU FSM arcs (from -> to); must match rtl/aon/pmu.sv.
+  // PMU FSM arcs (from -> to); must match rtl/aon/pmu.sv. Written with
+  // functions/case (not array constants) so Icarus Verilog accepts it too.
   localparam int NARC = 24;
-  localparam logic [9:0] ARCS [NARC] = '{
-    {5'd0, 5'd1}, {5'd1, 5'd2}, {5'd1, 5'd18}, {5'd2, 5'd3}, {5'd2, 5'd7},
-    {5'd3, 5'd4}, {5'd3, 5'd17}, {5'd4, 5'd5}, {5'd5, 5'd6}, {5'd6, 5'd3},
-    {5'd7, 5'd8}, {5'd7, 5'd17}, {5'd8, 5'd9}, {5'd9, 5'd10}, {5'd10, 5'd11},
-    {5'd10, 5'd12}, {5'd11, 5'd12}, {5'd12, 5'd13}, {5'd13, 5'd14}, {5'd14, 5'd15},
-    {5'd15, 5'd16}, {5'd16, 5'd17}, {5'd17, 5'd18}, {5'd18, 5'd0}};
+  function automatic logic [9:0] arc(input int a);
+    case (a)
+      0: arc = {5'd0, 5'd1};    1: arc = {5'd1, 5'd2};    2: arc = {5'd1, 5'd18};
+      3: arc = {5'd2, 5'd3};    4: arc = {5'd2, 5'd7};    5: arc = {5'd3, 5'd4};
+      6: arc = {5'd3, 5'd17};   7: arc = {5'd4, 5'd5};    8: arc = {5'd5, 5'd6};
+      9: arc = {5'd6, 5'd3};   10: arc = {5'd7, 5'd8};   11: arc = {5'd7, 5'd17};
+     12: arc = {5'd8, 5'd9};   13: arc = {5'd9, 5'd10};  14: arc = {5'd10, 5'd11};
+     15: arc = {5'd10, 5'd12}; 16: arc = {5'd11, 5'd12}; 17: arc = {5'd12, 5'd13};
+     18: arc = {5'd13, 5'd14}; 19: arc = {5'd14, 5'd15}; 20: arc = {5'd15, 5'd16};
+     21: arc = {5'd16, 5'd17}; 22: arc = {5'd17, 5'd18}; 23: arc = {5'd18, 5'd0};
+      default: arc = '1;
+    endcase
+  endfunction
   // Arcs that cannot be reached at SoC level with the PicoRV32 stand-in
   // (no D-cache: cache_clean is constant 1; the WFI-abort window depends on
   // clock phase). They are covered by the PMU unit test and by formal cover.
-  localparam logic [NARC-1:0] ARC_OPTIONAL = NARC'(1) << 11 | NARC'(1) << 2;
-  localparam string STN [19] = '{"RUN", "IDLE_REQ", "CLK_GATE", "IDLE", "DVFS_VUP",
-    "DVFS_SWITCH", "DVFS_VDN", "BUS_DRAIN", "ISO_ON", "PWR_OFF", "OFF", "RET_EXIT",
-    "PWR_ON", "RST_CLK_ON", "RST_CLK_OFF", "RST_REL", "ISO_OFF", "CLK_UNGATE", "WAKE_REL"};
+  function automatic bit arc_optional(input int a);
+    return (a == 2) || (a == 11);
+  endfunction
+  function automatic string stn(input logic [4:0] st);
+    case (st)
+      0: stn = "RUN";          1: stn = "IDLE_REQ";     2: stn = "CLK_GATE";
+      3: stn = "IDLE";         4: stn = "DVFS_VUP";     5: stn = "DVFS_SWITCH";
+      6: stn = "DVFS_VDN";     7: stn = "BUS_DRAIN";    8: stn = "ISO_ON";
+      9: stn = "PWR_OFF";     10: stn = "OFF";         11: stn = "RET_EXIT";
+     12: stn = "PWR_ON";      13: stn = "RST_CLK_ON";  14: stn = "RST_CLK_OFF";
+     15: stn = "RST_REL";     16: stn = "ISO_OFF";     17: stn = "CLK_UNGATE";
+     18: stn = "WAKE_REL";
+      default: stn = "?";
+    endcase
+  endfunction
+  // Architectural power states: 0 RUN, 1 IDLE, 2 SLEEP, 3 DEEP_SLEEP
+  function automatic string psn(input int p);
+    case (p)
+      0: psn = "RUN"; 1: psn = "IDLE"; 2: psn = "SLEEP"; default: psn = "DEEP_SLEEP";
+    endcase
+  endfunction
 
   int arc_hits [NARC];
   int illegal_arcs;
-
-  // Architectural power states: 0 RUN, 1 IDLE, 2 SLEEP, 3 DEEP_SLEEP
-  localparam string PSN [4] = '{"RUN", "IDLE", "SLEEP", "DEEP_SLEEP"};
   int ps_hits [4][4];
   int ps_cur;
   int op_hits [3][3];
   logic [4:0] state_prev;
   logic [1:0] op_prev;
+  logic [4:0] cov_s;
+  logic [1:0] cov_op;
+  int         cov_ps;
+  bit         cov_found;
 
   always @(posedge clk_aon) if (por_n) begin
-    automatic logic [4:0] s = pmu_state;
-    automatic logic [1:0] op = dut.u_aon.u_pmu.cur_op_q;
-    automatic int ps_new = -1;
-    if (checks_on && s != state_prev) begin
-      automatic bit found = 1'b0;
+    cov_s  = pmu_state;
+    cov_op = dut.u_aon.u_pmu.cur_op_q;
+    cov_ps = -1;
+    if (checks_on && cov_s != state_prev) begin
+      cov_found = 1'b0;
       for (int a = 0; a < NARC; a++)
-        if (ARCS[a] == {state_prev, s}) begin arc_hits[a]++; found = 1'b1; end
-      if (!found) begin
+        if (arc(a) == {state_prev, cov_s}) begin arc_hits[a]++; cov_found = 1'b1; end
+      if (!cov_found) begin
         illegal_arcs++;
-        $display("[tb] ERROR: illegal PMU transition %0d -> %0d", state_prev, s);
+        $display("[tb] ERROR: illegal PMU transition %0d -> %0d", state_prev, cov_s);
       end
     end
-    if (s == ST_RUN)  ps_new = 0;
-    if (s == ST_IDLE) ps_new = 1;
-    if (s == ST_OFF)  ps_new = dut.u_aon.ram_ret ? 3 : 2;
-    if (ps_new >= 0 && ps_new != ps_cur) begin
-      ps_hits[ps_cur][ps_new]++;
-      ps_cur = ps_new;
+    if (cov_s == ST_RUN)  cov_ps = 0;
+    if (cov_s == ST_IDLE) cov_ps = 1;
+    if (cov_s == ST_OFF)  cov_ps = dut.u_aon.ram_ret ? 3 : 2;
+    if (cov_ps >= 0 && cov_ps != ps_cur) begin
+      ps_hits[ps_cur][cov_ps]++;
+      ps_cur = cov_ps;
     end
-    if (checks_on && op != op_prev) op_hits[op_prev][op]++;
-    state_prev <= s;
-    op_prev    <= op;
+    if (checks_on && cov_op != op_prev) op_hits[op_prev][cov_op]++;
+    state_prev <= cov_s;
+    op_prev    <= cov_op;
   end
 
   initial begin
@@ -266,17 +294,17 @@ module tb_soc #(
     int missing = 0, hit = 0;
     $fdisplay(fd, "== PMU FSM transition coverage ==");
     for (int a = 0; a < NARC; a++) begin
-      $fdisplay(fd, "  %-12s -> %-12s %6d %s", STN[ARCS[a][9:5]], STN[ARCS[a][4:0]], arc_hits[a],
-                arc_hits[a] > 0 ? "" : (ARC_OPTIONAL[a] ? "(not reachable at SoC level)" : "MISSING"));
+      $fdisplay(fd, "  %-12s -> %-12s %6d %s", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a],
+                arc_hits[a] > 0 ? "" : (arc_optional(a) ? "(not reachable at SoC level)" : "MISSING"));
       if (arc_hits[a] > 0) hit++;
-      else if (!ARC_OPTIONAL[a]) missing++;
+      else if (!arc_optional(a)) missing++;
     end
     $fdisplay(fd, "  arcs hit: %0d/%0d, illegal transitions: %0d", hit, NARC, illegal_arcs);
     $fdisplay(fd, "== Architectural power-state transitions ==");
     for (int f = 0; f < 4; f++)
       for (int t = 0; t < 4; t++)
         if ((f == 0) != (t == 0)) begin
-          $fdisplay(fd, "  %-10s -> %-10s %6d %s", PSN[f], PSN[t], ps_hits[f][t],
+          $fdisplay(fd, "  %-10s -> %-10s %6d %s", psn(f), psn(t), ps_hits[f][t],
                     ps_hits[f][t] > 0 ? "" : "MISSING");
           if (ps_hits[f][t] == 0) missing++;
         end
