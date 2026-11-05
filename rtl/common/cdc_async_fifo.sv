@@ -34,8 +34,8 @@ module cdc_async_fifo #(
   logic [AW:0] wbin_q, wgray_q, rgray_wsync;
   logic [AW:0] rbin_q, rgray_q, wgray_rsync;
 
-  function automatic logic [AW:0] bin2gray(input logic [AW:0] b);
-    return b ^ (b >> 1);
+  function automatic [AW:0] bin2gray(input [AW:0] b);
+    bin2gray = b ^ (b >> 1);
   endfunction
 
   // ---------------- write domain ----------------

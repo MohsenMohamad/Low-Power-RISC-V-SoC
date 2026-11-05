@@ -6,7 +6,7 @@ cover
 prove: mode prove
 prove: depth 24
 cover: mode cover
-cover: depth 48
+cover: depth 30
 
 [engines]
 prove: smtbmc z3

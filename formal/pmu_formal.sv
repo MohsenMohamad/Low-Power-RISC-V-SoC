@@ -67,7 +67,7 @@ module pmu_formal (
     // and withdraws the ack only after the request is withdrawn (or when it
     // is isolated: the isolation cell clamps the ack to 0).
     if (idle_ack_i && !$past(idle_ack_i)) assume ($past(idle_req) && !$past(iso_en));
-    if (!idle_ack_i && $past(idle_ack_i)) assume (!$past(idle_req) || $past(iso_en));
+    if (!idle_ack_i && $past(idle_ack_i)) assume (!$past(idle_req) || iso_en);
   end
   // Isolated outputs read as 0; a core held in reset neither sleeps nor acks.
   always @(*) if (iso_en) assume (!idle_ack_i);

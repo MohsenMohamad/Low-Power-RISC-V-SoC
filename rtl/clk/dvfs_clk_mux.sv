@@ -10,10 +10,14 @@
 //   active[i] = en_q[i] | en_n[i]  (drops only after the branch is fully off)
 // A branch therefore only starts after every other branch has stopped on a
 // low phase, so the OR of the gated clocks never contains a runt pulse,
-// independent of the frequency ratio. active_o is the per-branch status (each
-// bit in its own clock domain) for the PMU, which synchronizes it.
-// sel_i must be quasi-static (changed only by the PMU while the downstream
-// clock is gated).
+// independent of the frequency ratio.
+// active_o[i] (status for the PMU, which synchronizes it) is set only when
+// branch i is enabled AND every other branch's synchronizer has observed it
+// active. Only then may sel_i change again: otherwise a branch could still
+// hold a stale "all others off" view and start while branch i is running
+// (found by formal/dvfs_mux.sby).
+// sel_i must only change when active_o == onehot(sel_i) (the PMU waits for
+// that), and while the downstream clock is gated.
 // -----------------------------------------------------------------------------
 `include "sva_macros.svh"
 module dvfs_clk_mux #(
@@ -30,9 +34,19 @@ module dvfs_clk_mux #(
 );
   logic [N-1:0] en_q, en_n, gclk;
   logic [N-1:0] active;
+  logic [N-1:0] osync [N];   // osync[i][j]: branch i's view of branch j
+  logic [N-1:0] seen_all;    // branch j seen active by every other branch
 
-  assign active   = en_q | en_n;
-  assign active_o = active;
+  assign active = en_q | en_n;
+
+  always_comb begin
+    for (int j = 0; j < N; j++) begin
+      seen_all[j] = 1'b1;
+      for (int i = 0; i < N; i++)
+        if (i != j) seen_all[j] = seen_all[j] & osync[i][j];
+    end
+  end
+  assign active_o = en_n & seen_all;
 
   for (genvar i = 0; i < N; i++) begin : g_branch
     logic [N-1:0] others_sync;
@@ -50,6 +64,7 @@ module dvfs_clk_mux #(
       .d_i    (active),
       .q_o    (others_sync)
     );
+    assign osync[i] = others_sync;
 
     always_comb begin
       others_active = 1'b0;
@@ -88,8 +103,34 @@ module dvfs_clk_mux #(
   assign unused = test_en_i;
 
   // Glitch-freedom invariant: at most one branch enabled at any time.
-  // (Checked in formal with multiclock; here sampled on every source edge.)
-  for (genvar i = 0; i < N; i++) begin : g_sva
-    `SVA_ASSERT(a_onehot_en, clk_i[i], rst_ni, $onehot0(en_n))
+  // (Sampled on the output clock here; formal/dvfs_mux.sby checks the full
+  // property at every step with arbitrary, unrelated source clocks.)
+  `SVA_ASSERT(a_onehot_en, clk_o, rst_ni, $onehot0(en_n))
+
+`ifdef FORMAL_MULTICLOCK
+  // Checked at every solver step with free-running, unrelated source clocks
+  // (formal/dvfs_mux.sby, multiclock on). Only after reset: at power-up the
+  // ICG latches hold random values until their clock first goes low.
+  logic f_init = 1'b1;
+  logic f_rst_done = 1'b0;
+  always @($global_clock) begin
+    f_init <= 1'b0;
+    if (f_init || !rst_ni) f_rst_done <= 1'b0;
+    else if (g_branch[0].rst_n && g_branch[1].rst_n && g_branch[2].rst_n && !(|clk_i))
+      f_rst_done <= 1'b1;
   end
+  always @($global_clock) if (!f_init && f_rst_done && $past(f_rst_done)) begin
+    // gated branch clocks never rise or fall except with their source
+    if (gclk[0] && !$past(gclk[0])) f_rise0: assert (clk_i[0] && !$past(clk_i[0]));
+    if (gclk[1] && !$past(gclk[1])) f_rise1: assert (clk_i[1] && !$past(clk_i[1]));
+    if (gclk[2] && !$past(gclk[2])) f_rise2: assert (clk_i[2] && !$past(clk_i[2]));
+    if (!gclk[0] && $past(gclk[0])) f_fall0: assert (!clk_i[0] && $past(clk_i[0]));
+    if (!gclk[1] && $past(gclk[1])) f_fall1: assert (!clk_i[1] && $past(clk_i[1]));
+    if (!gclk[2] && $past(gclk[2])) f_fall2: assert (!clk_i[2] && $past(clk_i[2]));
+    // a branch only starts after every branch was low (no merged pulses)
+    if (|(gclk & ~$past(gclk))) f_gap: assert ($past(gclk) == '0);
+    f_onehot: assert ($onehot0(gclk));
+    f_onehot_en: assert ($onehot0(en_n));
+  end
+`endif
 endmodule

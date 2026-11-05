@@ -22,12 +22,19 @@
 `define SVA_MACROS_SVH
 
 `ifdef FORMAL
+  // name_pv ("past valid") masks the first cycle, where $past() is undefined.
   `define SVA_ASSERT(name, clk, rst_n, expr) \
-    always @(posedge clk) if (rst_n) name: assert (expr);
+    logic name``_pv = 1'b0; \
+    always @(posedge clk) name``_pv <= 1'b1; \
+    always @(posedge clk) if (name``_pv && rst_n) name: assert (expr);
   `define SVA_ASSERT_IMP(name, clk, rst_n, a, c) \
-    always @(posedge clk) if (rst_n) name: assert (!(a) || (c));
+    logic name``_pv = 1'b0; \
+    always @(posedge clk) name``_pv <= 1'b1; \
+    always @(posedge clk) if (name``_pv && rst_n) name: assert (!(a) || (c));
   `define SVA_ASSERT_NXT(name, clk, rst_n, a, c) \
-    always @(posedge clk) if (rst_n && $past(rst_n) && $past(a)) name: assert (c);
+    logic name``_pv = 1'b0; \
+    always @(posedge clk) name``_pv <= 1'b1; \
+    always @(posedge clk) if (name``_pv && rst_n && $past(rst_n) && $past(a)) name: assert (c);
   `define SVA_COVER(name, clk, rst_n, expr) \
     always @(posedge clk) if (rst_n) name: cover (expr);
 `elsif SVA_ON
