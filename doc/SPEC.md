@@ -26,13 +26,21 @@
 - IEEE 1801 UPF file for both domains.
 
 ## Verification
-- CPU: lockstep co-simulation against Spike on random instruction streams
-  (riscv-dv pygen or in-house generator); riscv-arch-test compliance suite.
+- Primary methodology: SystemVerilog.
+  - SVA for protocols (AXI4-Lite), PMU sequencing, isolation clamps, CDC handshakes.
+  - Class-based SystemVerilog testbenches with constrained random (randomize())
+    and cover properties, runnable with Verilator --timing.
+  - UVM (IEEE 1800.2) verification IP under verif/uvm/ for subsystem-level
+    verification, run on a commercial simulator (Xcelium / VCS / Questa).
+- CPU: lockstep co-simulation against Spike (via DPI) on random instruction streams;
+  riscv-arch-test compliance suite.
 - Caches: random traffic vs a memory reference model, eviction/flush scenarios.
-- PMU: SVA assertions on sequencing and isolation, formal proofs (SymbiYosys),
-  OFF-state corruption model, full power-state transition coverage.
-- cocotb + Python reference models; SystemVerilog UVM where the simulator supports it.
-- Functional coverage reports; Verilator lint clean; `make test` runs everything.
+- PMU: formal proofs (SymbiYosys), OFF-state corruption model, full power-state
+  transition coverage.
+- cocotb tests are kept only as a fast smoke regression in CI; no new cocotb tests.
+- Python is used for regression, triage, coverage merging and automation, not
+  for testbenches.
+- Verilator lint clean; `make test` runs everything that runs on open-source tools.
 
 ## Firmware (bare-metal C)
 - Boot ROM: cold boot vs resume detection, context restore.
