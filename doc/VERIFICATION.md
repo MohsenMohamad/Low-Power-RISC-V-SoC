@@ -1,5 +1,7 @@
 # Verification of the CPU subsystem
 
+> Integration note: this document describes the CPU-subsystem flows as delivered by the CPU branch, before integration. The commands are now part of the top-level `make test`; current results, the changed coverage and mutation gates (holes and surviving mutants now fail the run) and the changes to the cache maintenance semantics are in doc/INTEGRATION_REPORT.md.
+
 Scope: `core_top`, `icache`, `dcache` and `axil_mux2` (via `cpu_top`). All results below were produced in this repository's environment with the tool versions listed in the README. `make test` reproduces them.
 
 ## Flows

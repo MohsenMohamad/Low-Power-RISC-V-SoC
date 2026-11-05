@@ -109,6 +109,18 @@ Verification / flow:
     Measured, then the firmware cleans before arming timers and uses longer wake
     delays; no check was removed. A slow bitwise CRC (~3200 instructions) was
     replaced by a nibble-table CRC.
+11. **Co-simulation did not check the idle handshake strongly enough** (found
+    by the fixed mutation runner: mutant `wfi_no_hold`, a core that leaves WFI
+    while acknowledged, survived 24 seeds). The wake race was injected in only
+    ~1 in 2 handshakes on one random line, and "no activity while idle_ack"
+    looked only at VALID signals. Now all interrupt lines rise during 3 of 4
+    acknowledged handshakes and transactions still in flight count as
+    activity; the mutant is killed.
+12. **Equivalent mutants**: `dc_clean_during_evict` as first written removed
+    one of two redundant terms and could not be killed; it now removes both and
+    is killed. `ack_not_quiescent` is equivalent with the current caches (a
+    drained core implies idle caches and mux) and is waived with that reason in
+    `dv/mutation_waivers.txt`.
 
 ### Results
 
@@ -117,24 +129,29 @@ GCC 13.2.0 / binutils 2.42, Spike `f90d5af`, Icarus 12.0, Yosys 0.33,
 SymbiYosys yosys-0.33, Z3 5.3.3, sv2v v0.0.13; 4 CPU cores). Re-run a single
 number with the command next to it; `make test` runs all of them.
 
+The first complete `make test` on this branch failed 14/16: `mutation` (3
+mutants not killed, bugs 11-12) and `selftest` (a crash in the self-test
+harness itself, which now records a crash as a failure). Both were fixed; the
+table is from the following clean run.
+
 | Flow | Result | Command |
 |---|---|---|
 | Toolchain check | all 11 pinned tools match | `make toolchain` |
 | Lint (Verilator -Wall) | SoC with and without SVA, CPU subsystem with and without SVA: clean | `make lint` |
-| Spike lockstep co-simulation | 200/200 random seeds + 2/2 directed programs pass (202/202 required); 1,001,666 instructions, 20,237 exceptions, 18,033 interrupts compared against Spike; idle handshake exercised in the random runs | `make cosim` |
+| Spike lockstep co-simulation | 200/200 random seeds + 2/2 directed programs pass (202/202 required); 1,011,421 instructions, 20,239 exceptions, 19,059 interrupts compared against Spike; 770 PMU idle handshakes driven by the bench (with wake races), no activity while acknowledged | `make cosim` |
 | riscv-arch-test 3.9.1 | 63/63 applicable tests pass (I 39, M 8, Zifencei 1, privilege 15); 0 not applicable | `make archtest` |
 | Cache unit benches | D-cache 8/8 seeds (64,000 responses, 869 maintenance ops, 1,094,007 post-maintenance memory checks, 0 mismatches), I-cache 8/8 (72,000 responses), AXI mux 8/8; 24/24 required | `make cachetest` |
 | CPU coverage | ISA plan 127/127, cover properties 66/67 (hole `cp_wb_error` waived with reason), covergroup bins 73/73; code (reported, not gated): line 96.5 %, branch 99.7 %, expression 99.2 %, toggle 87.2 % | `make coverage` |
 | SoC pm_test, Verilator (random OFF-state corruption) | PASS; PMU arcs 23/24 (IDLE_REQ->WAKE_REL waived with reason), all 6 completed power-state transitions, all 6 DVFS pairs, 1 refused SLEEP reported as ABORTED, 12 corruption events (2715 state elements, 80,270 bits of the in-house CPU domain) | `make sim` |
 | SoC pm_test, Icarus (4-state X corruption) | PASS, same coverage, no X reached PD_AON | `make sim-x` |
-| SoC boot test, Verilator | PASS: ROM boot, RAM execution, mtime/rdtime, timer interrupt, uncached alias, SLVERR, dirty-D-cache refusal (ABORTED), SLEEP/resume with dirty D-cache data, CRC-rejected resume -> cold boot | `make boot` |
+| SoC boot test, Verilator | PASS (2 corruption events): ROM boot, RAM execution, mtime/rdtime, timer interrupt, uncached alias, SLVERR, dirty-D-cache refusal (ABORTED), SLEEP/resume with dirty D-cache data, CRC-rejected resume -> cold boot | `make boot` |
 | SoC boot test, Icarus | PASS | `make boot-x` |
 | SoC bench negative tests | 5/5 detected: defeated isolation (Verilator, Icarus X), firmware FAIL, timeout, too-short CPU reset | `make sim-neg` |
 | PMU unit test | PASS, 400 episodes, full functional coverage (24/24 arcs, 6/6 DVFS pairs, 9/9 mode x wake source, dirty refusal, WFI abort, wake during DVFS) | `make sim-pmu` |
-| Formal | FORMAL_RESULT | `make formal` |
-| Mutation | MUTATION_RESULT | `make mutation` |
-| Checker self-tests | SELFTEST_RESULT | `make selftest` |
-| `make test` | MAKETEST_RESULT | `make test` |
+| Formal (SymbiYosys) | 8/8 jobs: `pmu` prove (k-induction, unbounded) + cover (24/24 FSM arcs reached); `dvfs_mux` prove (PDR, unbounded, multiclock) + cover (3/3); `async_fifo` prove + cover (3/3); `cdc_snapshot` (new, mtime crossing) prove (PDR, unbounded) + cover (2/2) | `make formal` |
+| Mutation | 21/22 mutants killed (by co-simulation and/or unit benches, 24 seeds each), 1 waived with reason (`ack_not_quiescent`, equivalent), 0 surviving, 0 build failures; 22/22 required | `make mutation` |
+| Checker self-tests | 30/30: `check_results` (missing, unknown, FAIL not overwritten, SKIPPED, ABORTED, N/A rules, unreadable), `check_soc_cov` (hole, waiver rules, missing bin, aborted is not coverage, empty), `cov_report` (no databases, unwaived hole, waiver rules), `mutation.py` (survivor, build failure, not applied, waiver rules), `run_cosim` / `run_archtest` / `run_cachetest` parsers, PMU unit bench and PMU formal proof on a PMU mutant | `make selftest` |
+| `make test` | 16/16 required steps PASS, exit 0, 1441 s from an empty `build/` | `make test` |
 
 Measured power-state latency (SoC bench, pm_test, clk_aon 41 ns, CPU OP0/1/2 =
 47/23/11 ns; `make sim`, file `build/sim/cov_pm_test_verilator.txt`):
