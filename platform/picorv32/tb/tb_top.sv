@@ -165,7 +165,10 @@ module tb_top;
                      end else tcnt <= tcnt + 1;
             T_STOP:  if (tcnt == UART_DIV - 1) begin
                          tcnt <= 0; tst <= T_IDLE;
-                         if (!uart_txd) $display("\n[TB] UART framing error");
+                         if (!uart_txd) begin
+                             $display("\n[TB] UART framing error");
+                             finish_sim(32'hDEAD_0003);
+                         end
                          $write("%c", tsh);
                          if (log_fd != 0) $fwrite(log_fd, "%c", tsh);
                          tail = {tail, string'(tsh)};

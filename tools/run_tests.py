@@ -62,6 +62,15 @@ def record(name, ok, detail, secs=0.0):
     print("%-28s %-8s %6.1fs  %s" % (name, status, secs, detail), flush=True)
 
 
+SIM_ERROR_RE = re.compile(r"%Error|%Warning|\[TB\] UART framing|\[TB\] CPU entered TRAP|PMU: |retention mode")
+
+
+def sim_errors(text):
+    """Simulation-time checks ($error from PMU/SRAM models, testbench)."""
+    m = SIM_ERROR_RE.search(text)
+    return None if not m else text[m.start():].splitlines()[0]
+
+
 def suite_verdict(text, must_skip, min_pass):
     """Parse '[TEST n] name RESULT' lines and check them against expectations."""
     res = {}
@@ -124,7 +133,10 @@ def main():
         rc, text, t = run([SIMBIN, "+rom_hex=%s/rom.hex" % pico, "+ram_hex=%s/app.hex" % pico,
                            "+timeout=400000000"], "pico_suite.log", 3600)
         ok, detail = suite_verdict(text, PICO_SKIPS, PICO_MIN_PASS)
-        ok = ok and "[TB] SIM RESULT: PASS" in text and rc == 0
+        err = sim_errors(text)
+        if err:
+            detail += "; simulation error: " + err
+        ok = ok and "[TB] SIM RESULT: PASS" in text and rc == 0 and not err
         record("suite on PicoRV32 SoC (RTL)", ok, detail, t)
     else:
         record("suite on PicoRV32 SoC (RTL)", None, "simulation or firmware build missing")
@@ -150,8 +162,13 @@ def main():
                                "+uart_log=" + ulog, "+timeout=200000000"] + args, "monitor_%s_sim.log" % name, 1800)
             crc, ctext, _ = run([sys.executable, os.path.join(ROOT, "tools", "monitor_check.py"), "check", spec, ulog],
                                 "monitor_%s_check.log" % name, 60)
-            ok = rc == 0 and "[TB] SIM RESULT: PASS" in text and crc == 0
-            record("monitor session (%s)" % name, ok, ctext.strip().splitlines()[-1] if ctext.strip() else "", t)
+            err = sim_errors(text)
+            ok = rc == 0 and "[TB] SIM RESULT: PASS" in text and crc == 0 and not err
+            detail = ctext.strip().splitlines()[-1] if ctext.strip() else ""
+            detail = detail.replace(ROOT + "/", "")
+            if err:
+                detail += "; simulation error: " + err
+            record("monitor session (%s)" % name, ok, detail, t)
     else:
         record("monitor sessions", None, "simulation or firmware build missing")
 
