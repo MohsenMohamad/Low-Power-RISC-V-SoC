@@ -1,0 +1,20 @@
+// Compile list for the PMU UVM environment (paths relative to this file: use -F)
++incdir+../agents/axi_lite
++incdir+../agents/pwr
++incdir+../ral
++incdir+../env
++incdir+../tests
++incdir+../tb
+../stub/pmu_stub.sv
+../agents/axi_lite/axi_lite_if.sv
+../agents/axi_lite/axi_lite_protocol_checker.sv
+../agents/pwr/pwr_if.sv
+../agents/axi_lite/axi_lite_pkg.sv
+../agents/pwr/pwr_pkg.sv
+../ral/pmu_ral_pkg.sv
+../env/pmu_env_pkg.sv
+../tests/pmu_test_pkg.sv
+../tb/pmu_dut_wrap.sv
+../tb/axi_lite_bind.sv
+../tb/pmu_sva_bind.sv
+../tb/pmu_tb_top.sv
