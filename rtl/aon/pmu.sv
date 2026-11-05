@@ -17,7 +17,9 @@
 //       -> IDLE                                   (MODE = IDLE)
 //       -> BUS_DRAIN -> ISO_ON -> PWR_OFF -> OFF  (MODE = SLEEP/DEEP_SLEEP)
 //   DEEP_SLEEP additionally asserts ram_ret_o on the way into OFF.
-// Wake (any of meip/mtip/msip):
+// Wake (a wake event: meip/mtip/msip that is set in WAKE_MASK; firmware writes
+// the sources it enabled in mie, so a pending but disabled interrupt cannot
+// wake the PMU while the core stays in WFI):
 //   OFF -> [RET_EXIT] -> PWR_ON (switch on, wait power_good)
 //       -> RST_CLK_ON -> RST_CLK_OFF (reset-clocking window for synchronous-
 //          reset logic; RST_CLK_CYCLES = 0 skips the clock pulse train)
@@ -46,6 +48,8 @@
 //   0x18 WAKE_CAUSE RO  [0] meip [1] mtip [2] msip sampled at the last wake
 //   0x1C SLEEP_CNT  RO  number of completed power-off cycles
 //   0x20 VSEL       RO  [1:0] current regulator voltage select
+//   0x24 WAKE_MASK  RW  [0] meip [1] mtip [2] msip wake enables (reset 3'b111)
+//   0x28 IDLE_CNT   RO  number of completed IDLE entries (CLK_GATE -> IDLE)
 // -----------------------------------------------------------------------------
 `include "sva_macros.svh"
 module pmu #(
@@ -149,10 +153,14 @@ module pmu #(
   logic [31:0] scratch0_q, scratch1_q;
   logic [2:0]  wake_cause_q;
   logic [31:0] sleep_cnt_q;
+  logic [2:0]  wake_mask_q;
+  logic [31:0] idle_cnt_q;
 
+  logic [2:0] wake_src;
   logic wake;
   logic vwait_q;   // a voltage change is settling in DVFS_VUP / DVFS_VDN
-  assign wake = meip_i | mtip_i | msip_i;
+  assign wake_src = {msip_i, mtip_i, meip_i};
+  assign wake     = |(wake_src & wake_mask_q);
 
   // ---------------------------------------------------------------------------
   // Next-state logic
@@ -325,6 +333,8 @@ module pmu #(
       scratch1_q       <= '0;
       wake_cause_q     <= '0;
       sleep_cnt_q      <= '0;
+      wake_mask_q      <= 3'b111;
+      idle_cnt_q       <= '0;
     end else begin
       // hardware events
       if (state_q == ST_DVFS_VDN && state_d == ST_IDLE) begin
@@ -335,6 +345,7 @@ module pmu #(
         wake_cause_q <= {msip_i, mtip_i, meip_i};
       if (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) st_err_dirty_q <= 1'b1;
       if (state_q == ST_PWR_OFF && state_d == ST_OFF) sleep_cnt_q <= sleep_cnt_q + 32'd1;
+      if (state_q == ST_CLK_GATE && state_d == ST_IDLE) idle_cnt_q <= idle_cnt_q + 32'd1;
       if (state_q == ST_RST_REL && state_d == ST_ISO_OFF) begin
         st_resume_q      <= 1'b1;
         st_resume_deep_q <= (mode_lat_q == MODE_DEEP);
@@ -361,6 +372,7 @@ module pmu #(
           10'h3: irq_en_q   <= wdata_i[0];
           10'h4: scratch0_q <= wdata_i;
           10'h5: scratch1_q <= wdata_i;
+          10'h9: wake_mask_q <= wdata_i[2:0];
           default: ;
         endcase
       end
@@ -386,6 +398,8 @@ module pmu #(
       10'h6: begin rdata_o = {29'b0, wake_cause_q}; err_o = we_i; end
       10'h7: begin rdata_o = sleep_cnt_q;           err_o = we_i; end
       10'h8: begin rdata_o = {30'b0, vsel_q};       err_o = we_i; end
+      10'h9:       rdata_o = {29'b0, wake_mask_q};
+      10'hA: begin rdata_o = idle_cnt_q;            err_o = we_i; end
       default: err_o = 1'b1;
     endcase
   end
@@ -470,6 +484,26 @@ module pmu #(
                                   dvfs_sel_q == seq_op_q && vsel_q >= seq_op_q && vsel_q >= cur_op_q)
   `SVA_ASSERT_IMP(a_dvfs_vdn,     clk_i, rst_ni, state_q == ST_DVFS_VDN,
                                   dvfs_sel_q == seq_op_q && cur_op_q == seq_op_q && vsel_q == seq_op_q)
+
+  // Wake mask: a wake event is accepted (IDLE or OFF left towards RUN) only
+  // for a pending source that is enabled in WAKE_MASK.
+  `SVA_ASSERT_IMP(a_wake_masked, clk_i, rst_ni,
+                  (state_q == ST_IDLE && state_d == ST_CLK_UNGATE) ||
+                  (state_q == ST_OFF && state_d != ST_OFF),
+                  (wake_src & wake_mask_q) != 3'b000)
+  // A pending source that is masked out keeps the PMU in IDLE / OFF.
+  `SVA_ASSERT_IMP(a_masked_holds, clk_i, rst_ni,
+                  (state_q == ST_IDLE || state_q == ST_OFF) && (wake_src & wake_mask_q) == 3'b000 &&
+                  !(state_q == ST_IDLE && dvfs_pend),
+                  state_d == state_q)
+  // IDLE_CNT counts exactly the CLK_GATE -> IDLE entries.
+  `SVA_ASSERT_NXT(a_idle_cnt, clk_i, rst_ni, state_q == ST_CLK_GATE && state_d == ST_IDLE,
+                  idle_cnt_q == $past(idle_cnt_q) + 32'd1)
+  `SVA_ASSERT_NXT(a_idle_cnt_hold, clk_i, rst_ni, !(state_q == ST_CLK_GATE && state_d == ST_IDLE),
+                  idle_cnt_q == $past(idle_cnt_q))
+  // Masked-out pending interrupt while gated / off (the case the mask exists for).
+  `SVA_COVER(c_idle_masked_pending, clk_i, rst_ni, state_q == ST_IDLE && wake_src != 3'b000 && !wake)
+  `SVA_COVER(c_off_masked_pending,  clk_i, rst_ni, state_q == ST_OFF  && wake_src != 3'b000 && !wake)
 
   // Transition coverage (every FSM arc).
   `SVA_COVER(c_run_idlereq,      clk_i, rst_ni, state_q == ST_RUN         && state_d == ST_IDLE_REQ)

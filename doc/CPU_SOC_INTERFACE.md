@@ -124,9 +124,11 @@ Rules:
 6. `core_sleep` = WFI retired, drained, both caches and the AXI mux idle, and
    no interrupt pending and enabled in `mie`. WFI follows the RISC-V
    privileged specification: it ends on an interrupt that is pending and
-   enabled in `mie`, regardless of `mstatus.MIE`. The PMU wakes on any of
-   `meip | mtip | msip`; firmware enables in `mie` every source it uses as a
-   wake source.
+   enabled in `mie`, regardless of `mstatus.MIE`. The PMU wakes on
+   `meip | mtip | msip` masked by its WAKE_MASK register; firmware enables in
+   `mie` every source it uses as a wake source and writes the same set to
+   WAKE_MASK (doc/SOC_REGMAP.md), so a pending interrupt that cannot end WFI
+   does not wake the PMU either (`pmu.a_wake_masked`, `pmu.a_masked_holds`).
 
 ## `cache_clean` and cache maintenance completion (W35)
 
@@ -145,8 +147,9 @@ operation completed.
   ways, i.e. after every write response. Bit 31 then reads 1 if any write-back
   of this operation failed, or if an eviction write-back failed since the
   previous maintenance operation (the evicted data is lost; it is reported once,
-  by the next operation). Firmware checks bit 31 after the clean and abandons a
-  low-power entry if it is set (`fw/crt0.S`, `pm_suspend` returns -1).
+  by the next operation). Firmware checks bit 31 after every clean and abandons a
+  low-power entry if it is set (`fw/arch/rv32m/pm_asm.S`, `pm_suspend` returns
+  `PM_EWB`).
 - `cache_clean` is a flop output that is low from the cycle a cacheable store
   is accepted, while any valid line is dirty, and while an eviction write-back
   is in flight.
@@ -201,9 +204,8 @@ these state elements and SRAM words when the supply drops and again at
 power-up, so any dependence on retained or reset-free state shows up in
 `make sim` / `make sim-x`.
 
-## Boot and resume (stage-1 firmware ABI)
+## Boot and resume
 
-The reset vector is the boot ROM base. The interim resume protocol used by
-`fw/crt0.S` (context with CSRs, CRC-32, PMU SCRATCH0/1) is described at the
-top of that file; doc/BOOT_ABI.md is a later-stage item (see
-doc/INTEGRATION_REPORT.md).
+The reset vector is the boot ROM base. Cold boot, resume detection, the saved
+context, its CRC, the image header and the PMU scratch registers are defined
+in doc/BOOT_ABI.md (implemented in `fw/bootrom/`, `fw/pm/pm.c`).

@@ -49,9 +49,15 @@ is in retention.
 | mtip          | Machine timer (`mtime >= mtimecmp`)        |
 | msip          | Machine timer `MSIP[0]`                    |
 
-The PMU wake event is `meip | mtip | msip`. Any interrupt that is enabled at
-its source (and, for meip, in the interrupt controller) wakes the CPU from
-IDLE, SLEEP and DEEP_SLEEP.
+The PMU wake event is `(meip & WAKE_MASK[0]) | (mtip & WAKE_MASK[1]) |
+(msip & WAKE_MASK[2])` (PMU register WAKE_MASK). An interrupt that is enabled
+at its source (and, for meip, in the interrupt controller) and in WAKE_MASK
+wakes the CPU from IDLE, SLEEP and DEEP_SLEEP. Firmware sets WAKE_MASK to the
+sources it enabled in `mie` before every WFI: a pending interrupt that is not
+enabled in `mie` cannot end WFI, so it must not wake the PMU either (otherwise
+the PMU would ungate the clock, find the core still in WFI and enter IDLE
+again, repeatedly). A source enabled in `mie` but masked in WAKE_MASK is never
+woken from IDLE / SLEEP / DEEP_SLEEP.
 
 Interrupt controller source numbers:
 
@@ -121,9 +127,11 @@ The ENABLE write uses byte lane 0.
 | 0x0C   | IRQ_EN     | RW   | 0           | [0] DVFS_DONE interrupt enable (intc source 2) |
 | 0x10   | SCRATCH0   | RW   | 0           | Retained scratch. Boot ROM convention: pointer to the saved CPU context. |
 | 0x14   | SCRATCH1   | RW   | 0           | Retained scratch. Boot ROM convention: resume magic `0x5E5E_0A0A`. |
-| 0x18   | WAKE_CAUSE | RO   | 0           | [0] meip, [1] mtip, [2] msip, sampled when the last wake event was accepted |
+| 0x18   | WAKE_CAUSE | RO   | 0           | [0] meip, [1] mtip, [2] msip (raw levels, unmasked), sampled when the last wake event was accepted |
 | 0x1C   | SLEEP_CNT  | RO   | 0           | Number of completed power-off entries (SLEEP + DEEP_SLEEP) |
 | 0x20   | VSEL       | RO   | 2           | [1:0] current regulator voltage select (`vsel_o`) |
+| 0x24   | WAKE_MASK  | RW   | `0x7`       | [0] meip, [1] mtip, [2] msip: sources that are PMU wake events (see "Interrupt routing"). Reset: all three |
+| 0x28   | IDLE_CNT   | RO   | 0           | Number of completed IDLE entries (clock gated with CTRL.MODE = IDLE, `CLK_GATE -> IDLE`). A refused power-down (ERR_DIRTY) is not counted |
 
 STATUS fields:
 
@@ -150,16 +158,18 @@ to a faster clock, and lowers it after it switches to a slower one.
 
 1. Set CTRL.MODE (and DVFS.TARGET_OP if a change is wanted).
 2. Enable in `mie` every interrupt used as a wake source (MEIE for interrupt
-   controller sources, MTIE, MSIE). WFI ends only on an interrupt that is
-   pending and enabled in `mie` (`mstatus.MIE` may stay 0).
+   controller sources, MTIE, MSIE), and write the same set to WAKE_MASK
+   (MEIE -> bit 0, MTIE -> bit 1, MSIE -> bit 2). WFI ends only on an
+   interrupt that is pending and enabled in `mie` (`mstatus.MIE` may stay 0).
 3. For SLEEP / DEEP_SLEEP, save the context to RAM, write SCRATCH0/1 and clean
    the D-cache (`mcachectl` bit 2), and check that `mcachectl` bit 31 (write-back
    error) reads 0. No cached store may follow the clean.
 4. Execute `wfi`.
 
-From IDLE, execution continues after `wfi`. From SLEEP or DEEP_SLEEP, the CPU
-restarts at the boot ROM with STATUS.RESUME set. A wake event already pending at
-`wfi` returns immediately.
+From IDLE, execution continues after `wfi`; IDLE_CNT has advanced by one if
+the clock was gated. From SLEEP or DEEP_SLEEP, the CPU restarts at the boot ROM
+with STATUS.RESUME set (doc/BOOT_ABI.md). A wake event already pending at
+`wfi` returns immediately (no transition: IDLE_CNT and SLEEP_CNT unchanged).
 
 ## Wake timer: `0x2000_4000`
 

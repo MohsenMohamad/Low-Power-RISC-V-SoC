@@ -7,14 +7,15 @@
 // Structure
 //   pmu_if          signal bundle (clocking via plain posedge sampling)
 //   pmu_episode     randomized low-power episode (mode, DVFS target, wake
-//                   source, abort / dirty-cache error injection, delays)
+//                   source, wake mask, masked-out pending interrupt ("noise"),
+//                   abort / dirty-cache error injection, delays)
 //   pmu_delay       randomized response delay of an environment block
 //   pmu_env         reactive models of the blocks around the PMU: clock gate,
 //                   power switch, CPU reset, DVFS clock mux, bus
 //   pmu_core        CPU core model: WFI, idle_req/idle_ack handshake, abort,
 //                   power loss / reboot, isolation clamping
-//   pmu_ref         reference model: expected STATUS / SLEEP_CNT / WAKE_CAUSE /
-//                   CUR_OP / VSEL / RAM retention per episode
+//   pmu_ref         reference model: expected STATUS / SLEEP_CNT / IDLE_CNT /
+//                   WAKE_CAUSE / CUR_OP / VSEL / RAM retention per episode
 //   pmu_cov         functional coverage (FSM arcs, DVFS pairs, mode x wake
 //                   source, error injection); pass requires full coverage
 //   pmu_test        drives N episodes through register writes, checks, reports
@@ -46,7 +47,8 @@ endinterface
 package pmu_tb_pkg;
   // register offsets
   localparam logic [11:0] R_CTRL = 12'h00, R_STATUS = 12'h04, R_DVFS = 12'h08, R_IRQ_EN = 12'h0C,
-                          R_WAKE = 12'h18, R_SLEEP_CNT = 12'h1C, R_VSEL = 12'h20;
+                          R_WAKE = 12'h18, R_SLEEP_CNT = 12'h1C, R_VSEL = 12'h20,
+                          R_WAKE_MASK = 12'h24, R_IDLE_CNT = 12'h28;
   localparam int ST_RUN = 0, ST_IDLE_REQ = 1, ST_IDLE = 3, ST_VUP = 4, ST_SWITCH = 5, ST_VDN = 6,
                  ST_OFF = 10;
   localparam int NARC = 24;
@@ -64,21 +66,38 @@ package pmu_tb_pkg;
     rand bit          do_dvfs;
     rand bit [1:0]    target;
     rand bit [1:0]    wake_src;    // 0 meip, 1 mtip, 2 msip
+    rand bit [2:0]    wake_mask;   // WAKE_MASK = the core's mie wake sources
+    rand bit          noise;       // a source outside the mask is pending while low power
+    rand bit [1:0]    noise_src;
+    rand int unsigned noise_len;   // cycles the masked source alone is pending
     rand bit          abort;       // interrupt arrives together with WFI
     rand bit          dirty;       // core reports dirty D-cache
     rand int unsigned wake_delay;  // cycles in low power before the wake event
     rand int unsigned ack_delay;   // core idle_ack latency
     rand int unsigned bus_busy;    // cycles the bus stays busy in BUS_DRAIN
 
-    constraint c_legal  { mode inside {[0:2]}; target inside {[0:2]}; wake_src inside {[0:2]}; }
+    constraint c_legal  { mode inside {[0:2]}; target inside {[0:2]}; wake_src inside {[0:2]};
+                          noise_src inside {[0:2]}; }
+    // The wake source is in the mask (= mie), the noise source is not.
+    // (Written as constant bit selects: Verilator 5.054's solver does not
+    // honour a variable bit select in a constraint; the episode is re-checked
+    // after randomize() in run().)
+    constraint c_mask   { (wake_src == 0) -> wake_mask[0]; (wake_src == 1) -> wake_mask[1];
+                          (wake_src == 2) -> wake_mask[2]; }
+    constraint c_noise  { noise dist {1'b0 := 1, 1'b1 := 1};
+                          (noise && noise_src == 0) -> !wake_mask[0];
+                          (noise && noise_src == 1) -> !wake_mask[1];
+                          (noise && noise_src == 2) -> !wake_mask[2];
+                          noise -> !abort;
+                          noise_len inside {[20:60]}; }
     constraint c_inject { abort dist {1'b0 := 9, 1'b1 := 1};
                           dirty dist {1'b0 := 8, 1'b1 := 2};
                           abort -> !dirty; }
     constraint c_delays { wake_delay inside {[0:40]}; ack_delay inside {[1:6]}; bus_busy inside {[0:6]}; }
 
     function string sprint();
-      return $sformatf("mode=%0d dvfs=%0d tgt=%0d wake=%0d abort=%0d dirty=%0d wd=%0d",
-                       mode, do_dvfs, target, wake_src, abort, dirty, wake_delay);
+      return $sformatf("mode=%0d dvfs=%0d tgt=%0d wake=%0d mask=%b noise=%0d/%0d abort=%0d dirty=%0d wd=%0d",
+                       mode, do_dvfs, target, wake_src, wake_mask, noise, noise_src, abort, dirty, wake_delay);
     endfunction
   endclass
 
@@ -189,13 +208,15 @@ package pmu_tb_pkg;
     bit          in_wfi, ack, dirty;
     bit          req_seen;            // idle_req as seen through the synchronizer
     int unsigned ack_delay = 2;
+    bit [2:0]    mie = 3'b111;        // {msip, mtip, meip} enables
 
     function new(virtual pmu_if v);
       vif = v;
     endfunction
 
+    // RISC-V WFI: ends on an interrupt that is pending and enabled in mie
     function bit irq_any();
-      return vif.meip | vif.mtip | vif.msip;
+      return |({vif.msip, vif.mtip, vif.meip} & mie);
     endfunction
 
     task automatic run();
@@ -232,6 +253,7 @@ package pmu_tb_pkg;
   // Reference model of the architecturally visible PMU state.
   class pmu_ref;
     int unsigned sleep_cnt;
+    int unsigned idle_cnt;
     bit [1:0]    cur_op = 2'd2;
     bit [1:0]    target = 2'd2;
     bit [2:0]    wake_cause;
@@ -250,7 +272,8 @@ package pmu_tb_pkg;
       exp_dvfs_done   = idled && (target != cur_op);
       if (exp_dvfs_done) cur_op = target;
       if (powered) sleep_cnt++;
-      if (!ep.abort) wake_cause = 3'b001 << ep.wake_src;
+      if (!ep.abort && ep.mode == 2'd0) idle_cnt++;   // CLK_GATE -> IDLE (a refusal goes BUS_DRAIN -> IDLE)
+      if (!ep.abort) wake_cause = (3'b001 << ep.wake_src) | (ep.noise ? (3'b001 << ep.noise_src) : 3'b000);
     endfunction
   endclass
 
@@ -260,6 +283,7 @@ package pmu_tb_pkg;
     int op_hits [3][3];
     int mode_wake [3][3];
     int dirty_hits [3];
+    int masked_hold [3];               // masked pending source held, per mode
     int abort_hits, wake_in_dvfs, illegal;
 
     function void sample_state(logic [4:0] prev, logic [4:0] cur);
@@ -277,6 +301,7 @@ package pmu_tb_pkg;
       else begin
         mode_wake[ep.mode][ep.wake_src]++;
         if (ep.dirty) dirty_hits[ep.mode]++;
+        if (ep.noise) masked_hold[ep.mode]++;
       end
     endfunction
 
@@ -303,6 +328,11 @@ package pmu_tb_pkg;
       for (int m = 1; m < 3; m++) begin
         $display("  dirty cache refused, mode %0d : %0d%s", m, dirty_hits[m], dirty_hits[m] == 0 ? "  MISSING" : "");
         if (dirty_hits[m] == 0) holes++;
+      end
+      for (int m = 0; m < 3; m++) begin
+        $display("  masked pending interrupt does not wake, mode %0d : %0d%s", m, masked_hold[m],
+                 masked_hold[m] == 0 ? "  MISSING" : "");
+        if (masked_hold[m] == 0) holes++;
       end
       $display("  WFI abort : %0d%s", abort_hits, abort_hits == 0 ? "  MISSING" : "");
       $display("  wake during DVFS : %0d%s", wake_in_dvfs, wake_in_dvfs == 0 ? "  MISSING" : "");
@@ -402,7 +432,9 @@ package pmu_tb_pkg;
       core.dirty     = ep.dirty;
       env.bus_busy   = ep.bus_busy;
 
-      // firmware: program and execute WFI
+      // firmware: program and execute WFI (mie and WAKE_MASK hold the same set)
+      core.mie = ep.wake_mask;
+      write(R_WAKE_MASK, {29'b0, ep.wake_mask});
       write(R_CTRL, {23'b0, 1'b1, 6'b0, ep.mode});
       if (ep.do_dvfs) write(R_DVFS, {30'b0, ep.target});
       write(R_IRQ_EN, 32'h1);
@@ -415,6 +447,16 @@ package pmu_tb_pkg;
         set_wake(ep.wake_src, 1'b1);              // interrupt races the WFI
       end else begin
         wait_state_in(ST_IDLE, ST_OFF, ST_VUP, ST_SWITCH, ST_VDN, 2000);
+        if (ep.noise) begin
+          // a pending interrupt outside the mask (and mie): no wake
+          wait_state_in(ST_IDLE, ST_OFF, ST_OFF, ST_OFF, ST_OFF, 2000);
+          set_wake(ep.noise_src, 1'b1);
+          for (int i = 0; i < ep.noise_len; i++) begin
+            @(posedge vif.clk);
+            check(vif.state inside {ST_IDLE, ST_OFF, ST_VUP, ST_SWITCH, ST_VDN},
+                  $sformatf("masked source woke the PMU: state %0d (%s)", vif.state, ep.sprint()));
+          end
+        end
         repeat (ep.wake_delay) @(posedge vif.clk);
         if (vif.state inside {ST_VUP, ST_SWITCH, ST_VDN}) cov.wake_in_dvfs++;
         set_wake(ep.wake_src, 1'b1);
@@ -425,6 +467,7 @@ package pmu_tb_pkg;
       repeat (3) @(posedge vif.clk);
       if (vif.state != ST_RUN) wait_state_in(ST_RUN, ST_RUN, ST_RUN, ST_RUN, ST_RUN, 4000);
       set_wake(ep.wake_src, 1'b0);                // firmware clears the source
+      if (ep.noise) set_wake(ep.noise_src, 1'b0);
       core.dirty = 1'b0;
 
       // checks against the reference model
@@ -442,6 +485,10 @@ package pmu_tb_pkg;
       check(v[2:0] == rm.wake_cause, $sformatf("WAKE_CAUSE %b exp %b (%s)", v[2:0], rm.wake_cause, ep.sprint()));
       read(R_VSEL, v);
       check(v[1:0] == rm.cur_op, "VSEL");
+      read(R_IDLE_CNT, v);
+      check(v == rm.idle_cnt, $sformatf("IDLE_CNT %0d exp %0d (%s)", v, rm.idle_cnt, ep.sprint()));
+      read(R_WAKE_MASK, v);
+      check(v[2:0] == ep.wake_mask, "WAKE_MASK readback");
       check(vif.dvfs_sel == rm.cur_op, "dvfs_sel");
       check(ret_seen == rm.exp_ret, $sformatf("RAM retention seen %0d (%s)", ret_seen, ep.sprint()));
       if (rm.exp_dvfs_done) cov.op_hits[op_before][rm.cur_op]++;
@@ -458,6 +505,9 @@ package pmu_tb_pkg;
       join_none
       for (int i = 0; i < n_episodes; i++) begin
         if (ep.randomize() != 1) $fatal(1, "episode randomize failed");
+        if (!ep.wake_mask[ep.wake_src] || (ep.noise && ep.wake_mask[ep.noise_src]))
+          $fatal(1, "episode constraints violated: %s", ep.sprint());
+        if ($test$plusargs("verbose")) $display("[tb_pmu] episode %0d: %s", i, ep.sprint());
         episode(ep);
       end
     endtask

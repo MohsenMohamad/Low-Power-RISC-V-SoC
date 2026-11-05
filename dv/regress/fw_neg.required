@@ -1,0 +1,6 @@
+# Firmware-flow negative tests (scripts/run_fw.py neg): each run must fail for its reason.
+fw-neg/soc-must-fail
+fw-neg/soc-idle-abort
+fw-neg/spike-selftest
+fw-neg/rom-unaligned-entry
+fw-neg/rom-bad-image-crc

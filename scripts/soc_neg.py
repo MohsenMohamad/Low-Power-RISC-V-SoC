@@ -36,12 +36,14 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    pm, nf = os.path.join(a.fw, "pm_test.hex"), os.path.join(a.fw, "neg_fail.hex")
+    rom = os.path.join(a.fw, "rom.hex")
+    pm = f"{rom} +ram={os.path.join(a.fw, 'pm_test.hex')}"
+    nf = f"{rom} +ram={os.path.join(a.fw, 'neg_fail.hex')}"
     cov = os.path.join(a.out, "cov.txt")
     cases = [
         ("iso-verilator", f"{a.vl} +rom={pm} +cov={cov} +break_iso",
          lambda out: "Assertion failed" in out or "[tb] ERROR" in out),
-        ("iso-icarus", f"{a.iv} +rom={pm} +cov={cov} +break_iso +timeout=6000000",
+        ("iso-icarus", f"{a.iv} +rom={pm} +cov={cov} +break_iso +timeout=20000000",
          lambda out: "[tb] ERROR" in out and "unknown" in out),
         ("fw-fail", f"{a.vl} +rom={nf} +cov={cov}",
          lambda out: "firmware=fail" in out),

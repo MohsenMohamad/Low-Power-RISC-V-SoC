@@ -1,0 +1,8 @@
+# Coverage goals of the validation suite on the integrated SoC (make fw-suite;
+# waivers: dv/regress/soc_pm_test.waivers).
+arc * >= 1                 # every PMU FSM arc
+illegal transitions == 0
+pstate * >= 1              # every completed architectural power-state transition
+dvfs * >= 1                # every DVFS operating-point pair
+aborted RUN->SLEEP >= 1    # test 46: the dirty-D-cache refusal is reported as ABORTED
+corrupt events >= 20       # OFF-state corruption on every power-off

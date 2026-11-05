@@ -7,13 +7,18 @@
 # Individual steps (each exits nonzero on failure):
 #   make toolchain   verify pinned tool versions (scripts/setup_toolchain.sh --check)
 #   make lint        Verilator -Wall: SoC (with and without SVA) and the CPU subsystem
-#   make fw          firmware (GCC 13.2): pm_test, boot_test, neg_fail
+#   make fw          firmware (GCC 13.2), one tree (fw/): lpsoc boot ROM + applications
+#                    (suite, pm_test, boot_test, neg_fail), Spike validation suite
 #   make sim         SoC, Verilator, pm_test, random OFF-state corruption + coverage goals
 #   make sim-x       SoC, Icarus 4-state, pm_test, X OFF-state corruption + coverage goals
 #   make boot        SoC, Verilator, stage-1 boot test + coverage goals
 #   make boot-x      SoC, Icarus 4-state, stage-1 boot test + coverage goals
 #   make sim-neg     negative tests of the SoC bench (defeated isolation, firmware FAIL, timeout)
 #   make sim-pmu     PMU unit testbench (class-based constrained random, full coverage)
+#   make fw-suite    firmware validation suite on the SoC (Verilator), every test required
+#   make fw-spike    firmware validation suite on Spike (--priv=M and --priv=MSU)
+#   make fw-monitor  scripted UART monitor sessions on the SoC (application, boot ROM)
+#   make fw-neg      firmware-flow negative tests (failing test, aborted IDLE, bad images)
 #   make cosim       CPU: directed + random programs in lockstep with Spike
 #   make archtest    CPU: riscv-arch-test 3.9.1 (rv32i_m I, M, Zifencei, privilege)
 #   make cachetest   caches / AXI mux: SystemVerilog constrained-random unit benches
@@ -55,8 +60,9 @@ CPU_SRCS  := rtl/pkg/riscv_pkg.sv rtl/tech/tech_sram_sp.sv \
 VLT_CFG   := lint/verilator.vlt
 VLT_SVA   := lint/verilator_sva.vlt
 
-FW_PROGS  := pm_test boot_test neg_fail
-FW_HEX    := $(FW_PROGS:%=$(BUILD)/fw/%.hex)
+FW_DIR    := $(BUILD)/fw/lpsoc
+FW_SRCS   := $(shell find fw -type f -name '*.[chS]' -o -type f -name '*.ld') fw/Makefile tools/mkimage.py
+FW_STAMP  := $(BUILD)/fw/.stamp
 CORRUPT   := $(BUILD)/corrupt/pd_cpu_corrupt.svh
 
 VL_SIM_FLAGS := --binary --timing --timescale 1ns/1ps -j 0 -DSVA_ON --assert -Wno-fatal \
@@ -69,6 +75,7 @@ CHECK   := $(PYTHON) scripts/check_results.py
 COSIM_BIN := $(BUILD)/cosim/obj/Vcosim
 
 .PHONY: test toolchain lint lint-soc lint-cpu fw corrupt sim sim-x boot boot-x sim-neg sim-pmu \
+        fw-suite fw-spike fw-monitor fw-neg \
         cosim cosim-build archtest cachetest coverage formal mutation selftest clean
 
 test:
@@ -91,9 +98,10 @@ lint-cpu:
 	@echo "== CPU lint clean =="
 
 # ------------------------------------------------------------------ firmware
-fw: $(FW_HEX)
-$(BUILD)/fw/%.hex: fw/%.c fw/crt0.S fw/include/soc.h fw/link.ld fw/Makefile scripts/bin2hex.py
-	$(MAKE) -C fw CROSS=$(RV_PREFIX) BUILD=../$(BUILD)/fw ../$(BUILD)/fw/$*.hex
+fw: $(FW_STAMP)
+$(FW_STAMP): $(FW_SRCS)
+	$(MAKE) -C fw CROSS=$(RV_PREFIX) all-platforms
+	@touch $@
 
 # ------------------------------------------------------------------ OFF-state corruption model
 corrupt: $(CORRUPT)
@@ -115,29 +123,58 @@ $(IV_TB): $(RTL_FILES) sim/tb_soc.sv $(CORRUPT)
 	$(IVERILOG) -g2012 -DCORRUPT_X -I$(BUILD)/corrupt -Irtl/include -s tb_soc -o $@ \
 	  $(BUILD)/sim/iv/soc_sv2v.v sim/tb_soc.sv
 
-# run_soc <simulator command> <rom> <log> <coverage file> <goals> [waivers]
+# run_soc <simulator command> <application hex> <log> <coverage file> <goals> [waivers]
+# (boot ROM: $(FW_DIR)/rom.hex; the application is preloaded into RAM by the bench)
 define run_soc
 	@mkdir -p $(BUILD)/sim
-	$(1) +rom=$(2) +cov=$(4) > $(3) 2>&1; rc=$$?; grep -E "^\[uart\]|ABORTED|ERROR|TEST" $(3); \
+	$(1) +rom=$(FW_DIR)/rom.hex +ram=$(2) +cov=$(4) > $(3) 2>&1; rc=$$?; grep -E "^\[uart\]|ABORTED|ERROR|TEST" $(3); \
 	  if [ $$rc -ne 0 ] || ! grep -q "TEST PASSED" $(3); then echo "FAIL: $(3)"; exit 1; fi
 	$(SOC_COV) --cov $(4) --goals $(5) $(if $(6),--waivers $(6))
 endef
 
-sim: $(VL_TB) $(BUILD)/fw/pm_test.hex
-	$(call run_soc,$(VL_TB),$(BUILD)/fw/pm_test.hex,$(BUILD)/sim/pm_test_verilator.log,$(BUILD)/sim/cov_pm_test_verilator.txt,dv/regress/soc_pm_test.goals,dv/regress/soc_pm_test.waivers)
+sim: $(VL_TB) $(FW_STAMP)
+	$(call run_soc,$(VL_TB),$(FW_DIR)/pm_test.hex,$(BUILD)/sim/pm_test_verilator.log,$(BUILD)/sim/cov_pm_test_verilator.txt,dv/regress/soc_pm_test.goals,dv/regress/soc_pm_test.waivers)
 
-sim-x: $(IV_TB) $(BUILD)/fw/pm_test.hex
-	$(call run_soc,$(VVP) -n $(IV_TB),$(BUILD)/fw/pm_test.hex,$(BUILD)/sim/pm_test_icarus.log,$(BUILD)/sim/cov_pm_test_icarus.txt,dv/regress/soc_pm_test.goals,dv/regress/soc_pm_test.waivers)
+sim-x: $(IV_TB) $(FW_STAMP)
+	$(call run_soc,$(VVP) -n $(IV_TB),$(FW_DIR)/pm_test.hex,$(BUILD)/sim/pm_test_icarus.log,$(BUILD)/sim/cov_pm_test_icarus.txt,dv/regress/soc_pm_test.goals,dv/regress/soc_pm_test.waivers)
 
-boot: $(VL_TB) $(BUILD)/fw/boot_test.hex
-	$(call run_soc,$(VL_TB),$(BUILD)/fw/boot_test.hex,$(BUILD)/sim/boot_test_verilator.log,$(BUILD)/sim/cov_boot_test_verilator.txt,dv/regress/soc_boot_test.goals,)
+boot: $(VL_TB) $(FW_STAMP)
+	$(call run_soc,$(VL_TB),$(FW_DIR)/boot_test.hex,$(BUILD)/sim/boot_test_verilator.log,$(BUILD)/sim/cov_boot_test_verilator.txt,dv/regress/soc_boot_test.goals,)
 
-boot-x: $(IV_TB) $(BUILD)/fw/boot_test.hex
-	$(call run_soc,$(VVP) -n $(IV_TB),$(BUILD)/fw/boot_test.hex,$(BUILD)/sim/boot_test_icarus.log,$(BUILD)/sim/cov_boot_test_icarus.txt,dv/regress/soc_boot_test.goals,)
+boot-x: $(IV_TB) $(FW_STAMP)
+	$(call run_soc,$(VVP) -n $(IV_TB),$(FW_DIR)/boot_test.hex,$(BUILD)/sim/boot_test_icarus.log,$(BUILD)/sim/cov_boot_test_icarus.txt,dv/regress/soc_boot_test.goals,)
 
 # Negative tests: each run must FAIL for the reason it was built to provoke.
-sim-neg: $(VL_TB) $(IV_TB) $(FW_HEX)
-	$(PYTHON) scripts/soc_neg.py --vl $(VL_TB) --iv "$(VVP) -n $(IV_TB)" --fw $(BUILD)/fw --out $(BUILD)/sim/neg
+sim-neg: $(VL_TB) $(IV_TB) $(FW_STAMP)
+	$(PYTHON) scripts/soc_neg.py --vl $(VL_TB) --iv "$(VVP) -n $(IV_TB)" --fw $(FW_DIR) --out $(BUILD)/sim/neg
+
+# ------------------------------------------------------------------ firmware on the SoC and Spike
+# scripts/run_fw.py runs and records; scripts/check_results.py judges against the
+# required lists (dv/regress/fw_*.required); the suite's power-state coverage is
+# checked against dv/regress/soc_fw_suite.goals.
+FW_RUN := $(PYTHON) scripts/run_fw.py --vl $(VL_TB) --fw $(FW_DIR)
+
+fw-suite: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) suite --out $(BUILD)/fw-suite; rc=$$?; \
+	$(CHECK) --name fw-suite --results $(BUILD)/fw-suite/results.json --required dv/regress/fw_suite_lpsoc.required \
+	  && $(SOC_COV) --cov $(BUILD)/fw-suite/cov_suite.txt --goals dv/regress/soc_fw_suite.goals \
+	     --waivers dv/regress/soc_pm_test.waivers && exit $$rc
+
+fw-spike: $(FW_STAMP)
+	$(FW_RUN) spike --spike $(SPIKE_PREFIX)/bin/spike --elf $(BUILD)/fw/spike/suite.elf --out $(BUILD)/fw-spike; rc=$$?; \
+	$(CHECK) --name fw-spike-M --results $(BUILD)/fw-spike/results_M.json --required dv/regress/fw_suite_spike.required \
+	  && $(CHECK) --name fw-spike-MSU --results $(BUILD)/fw-spike/results_MSU.json --required dv/regress/fw_suite_spike.required \
+	  && exit $$rc
+
+fw-monitor: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) monitor --out $(BUILD)/fw-monitor; rc=$$?; \
+	$(CHECK) --name fw-monitor --results $(BUILD)/fw-monitor/results.json --required dv/regress/fw_monitor.required \
+	  && exit $$rc
+
+fw-neg: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) neg --spike $(SPIKE_PREFIX)/bin/spike --out $(BUILD)/fw-neg; rc=$$?; \
+	$(CHECK) --name fw-neg --results $(BUILD)/fw-neg/results.json --required dv/regress/fw_neg.required \
+	  && exit $$rc
 
 # ------------------------------------------------------------------ PMU unit test
 $(BUILD)/sim/pmu/Vtb_pmu: rtl/aon/pmu.sv rtl/include/sva_macros.svh sim/pmu/tb_pmu.sv

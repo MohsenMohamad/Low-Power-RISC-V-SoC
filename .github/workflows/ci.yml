@@ -1,9 +1,10 @@
 # Full open-source regression. Uses the same toolchain script as local runs
 # (doc/SPEC.md: one setup script; CI uses the same script).
 name: make test
+# Runs on pull requests and on pushes to main only.
 on:
   push:
-    branches: [main, integration]
+    branches: [main]
   pull_request:
 jobs:
   test:
@@ -19,11 +20,16 @@ jobs:
           path: |
             /opt/verilator-5.054
             /opt/spike
-          key: tools-${{ hashFiles('scripts/setup_toolchain.sh') }}
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/setup_toolchain.sh') }}
       - name: Toolchain
         run: |
           sudo scripts/setup_toolchain.sh
           scripts/setup_toolchain.sh --env | sed -n 's/^export PATH=\(.*\):\$PATH$/\1/p' | tr ':' '\n' >> "$GITHUB_PATH"
+      - name: Toolchain check (job PATH)
+        run: |
+          echo "z3: $(command -v z3) -> $(readlink -f "$(command -v z3)")"
+          z3 --version
+          scripts/setup_toolchain.sh --check
       - name: make test
         run: make test
       - name: Results
@@ -35,3 +41,4 @@ jobs:
             build/regress
             build/coverage/report.md
             build/*/results.json
+            build/fw-*/*.log
