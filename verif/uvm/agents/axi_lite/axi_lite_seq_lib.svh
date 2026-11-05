@@ -131,8 +131,7 @@ class axi_lite_rand_seq extends axi_lite_base_seq;
       if (!t.randomize() with { addr == a;
                                 kind == (w ? AXI_WRITE : AXI_READ);
                                 dly_mode == local::dly_mode;
-                                (!local::partial_strb) -> strb == 4'hF;
-                                strb dist { 4'hF := 8, [4'h0:4'hE] :/ 2 }; })
+                                (!local::partial_strb) -> strb == 4'hF; })
         `uvm_fatal("SEQ", "randomize failed")
       finish_item(t);
     end

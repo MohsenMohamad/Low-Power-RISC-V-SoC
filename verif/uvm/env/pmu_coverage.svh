@@ -41,6 +41,7 @@ class pmu_coverage extends uvm_component;
     }
     x_from_dwell: cross cp_from, cp_dwell {
       ignore_bins reset = binsof(cp_from.reset);
+      ignore_bins run   = binsof(cp_from.run);    // RUN dwell is set by register programming
     }
     cp_wake_during_pd: coverpoint tr.wake_during_pd iff (tr.to_st inside {PMU_SLEEP, PMU_DEEP}) {
       bins normal = {0}; bins early_wake = {1};
@@ -112,10 +113,19 @@ class pmu_coverage extends uvm_component;
   endfunction
 
   function void report_phase(uvm_phase phase);
-    `uvm_info("COV", $sformatf({"\n  power-state transitions : %0.2f%%\n  DVFS                    : %0.2f%%\n",
-                                "  bus / error responses   : %0.2f%%"},
-                               cg_trans.get_inst_coverage(), cg_dvfs.get_inst_coverage(),
-                               cg_bus.get_inst_coverage()), UVM_LOW)
+    `uvm_info("COV", $sformatf({"\n  power-state transitions : %0.2f%%",
+                                "\n    matrix %0.1f%%  dwell %0.1f%%  early-wake %0.1f%%  state x OPP %0.1f%%",
+                                "\n  DVFS                    : %0.2f%%",
+                                "\n  bus / error responses   : %0.2f%%",
+                                "\n    reg x dir %0.1f%%  reason x dir %0.1f%%  reason x resp %0.1f%%  PD_CPU state x dir %0.1f%%  boundary %0.1f%%"},
+                               cg_trans.get_inst_coverage(),
+                               cg_trans.x_matrix.get_inst_coverage(), cg_trans.x_from_dwell.get_inst_coverage(),
+                               cg_trans.x_lp_early.get_inst_coverage(), cg_trans.x_state_opp.get_inst_coverage(),
+                               cg_dvfs.get_inst_coverage(),
+                               cg_bus.get_inst_coverage(),
+                               cg_bus.x_reg_kind.get_inst_coverage(), cg_bus.x_reason_kind.get_inst_coverage(),
+                               cg_bus.x_reason_resp.get_inst_coverage(), cg_bus.x_pd_state_kind.get_inst_coverage(),
+                               cg_bus.cp_boundary.get_inst_coverage()), UVM_LOW)
   endfunction
 
 endclass

@@ -26,32 +26,32 @@ class pmu_state_tracker extends uvm_object;
   // Wait until the model is in state s; returns 0 on timeout.
   task wait_for(pmu_state_e s, int unsigned max_cycles, output bit ok);
     bit got = 0;
-    fork : f_wait
-      begin
-        while (cur != s) @(changed);
-        got = 1;
-      end
-      begin
+    fork begin               // isolate: disable fork only kills our children
+      fork
+        begin
+          while (cur != s) @(changed);
+          got = 1;
+        end
         repeat (max_cycles) @(posedge vif.clk);
-      end
-    join_any
-    disable f_wait;
+      join_any
+      disable fork;
+    end join
     ok = got;
   endtask
 
   // Wait until the model leaves state s; returns 0 on timeout.
   task wait_leave(pmu_state_e s, int unsigned max_cycles, output bit ok);
     bit got = 0;
-    fork : f_leave
-      begin
-        while (cur == s) @(changed);
-        got = 1;
-      end
-      begin
+    fork begin
+      fork
+        begin
+          while (cur == s) @(changed);
+          got = 1;
+        end
         repeat (max_cycles) @(posedge vif.clk);
-      end
-    join_any
-    disable f_leave;
+      join_any
+      disable fork;
+    end join
     ok = got;
   endtask
 

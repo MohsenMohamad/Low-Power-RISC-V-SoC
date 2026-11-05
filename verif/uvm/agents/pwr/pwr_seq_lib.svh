@@ -34,7 +34,7 @@ class pwr_wake_seq extends pwr_base_seq;
   `uvm_object_utils(pwr_wake_seq)
   rand bit [IRQ_W-1:0] irq;
   rand int unsigned    delay;
-  constraint c_irq { irq != 0; $countones(irq) <= 2; delay <= 8; }
+  constraint c_irq { irq != 0; soft $countones(irq) <= 2; delay <= 8; }
   function new(string name = "pwr_wake_seq"); super.new(name); endfunction
   task body(); do_op(PWR_WAKE, irq, delay); endtask
 endclass

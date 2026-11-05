@@ -134,11 +134,13 @@ class pwr_driver extends uvm_driver #(pwr_item);
       case (req.op)
         PWR_WFI: begin
           wfi_req = 1;
-          fork : f_wfi
-            @(wfi_taken);
-            begin repeat (100000) @(vif.drv_cb); req.timed_out = 1; wfi_req = 0; end
-          join_any
-          disable f_wfi;
+          fork begin
+            fork
+              @(wfi_taken);
+              begin repeat (100000) @(vif.drv_cb); req.timed_out = 1; wfi_req = 0; end
+            join_any
+            disable fork;
+          end join
           if (req.timed_out) `uvm_error("PWRDRV", "WFI request: domain never reached running state")
         end
         PWR_WAKE:    irq_auto  |= req.irq;

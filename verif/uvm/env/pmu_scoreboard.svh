@@ -154,13 +154,17 @@ class pmu_scoreboard extends uvm_scoreboard;
         win_val.delete();
         win_before_reset.delete();
       end
-      if (cfg.check_invariants) check_invariants(o);
+      // Outputs are only defined once the reset has been applied; they are
+      // checked from the first snapshot after reset release.
       record(o);
       return;
     end
 
     // Reset release: cold boot brings PD_CPU up without a wake source
     if (p == null || !p.rst_n) begin
+      if (o.has_x) fail("SB_X", {"X/Z on a PMU power output after reset: ", o.convert2string()});
+      check_clamp(o);
+      if (cfg.check_invariants) check_invariants(o);
       set_state(PMU_PU, o);
       pu_sequence(o, exp_q);
       if (exp_q.size() == 0) set_state(PMU_RUN, o);

@@ -28,9 +28,16 @@ class pmu_env extends uvm_env;
       cfg.ral = pmu_reg_block::type_id::create("ral");
       cfg.ral.configure(null, "");
       cfg.ral.build(cfg.base_addr);
+      cfg.ral.reset();
       if (cfg.has_coverage) void'(cfg.ral.set_coverage(UVM_CVR_FIELD_VALS));
     end
     ral = cfg.ral;
+    // check_on_read masks volatile fields out of the compare but still calls
+    // get_mirrored_value() on them, which warns once per field per read.
+    uvm_root::get().set_report_id_action("UVM/FLD/GET_MIRRORED_VAL/VOL", UVM_NO_ACTION);
+    // The predictor warns for every error response; those are checked by the
+    // scoreboard (and are intentional in the error tests).
+    uvm_root::get().set_report_id_action("PREDICT_NOK", UVM_NO_ACTION);
 
     axi = axi_lite_agent::type_id::create("axi", this);
     axi.cfg = cfg.axi_cfg;

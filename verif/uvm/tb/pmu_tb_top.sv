@@ -12,12 +12,14 @@ module pmu_tb_top;
   localparam logic [`PWR_ISO_W-1:0] ISO_CLAMP = 16'h00F0;
 
   logic clk_aon   = 1'b0;
-  logic rst_aon_n = 1'b0;
+  logic rst_aon_n = 1'b1;
 
   always #5 clk_aon = ~clk_aon;          // 100 MHz always-on clock
 
+  // Explicit falling edge at 1 ns so the asynchronous reset is applied
+  // immediately (not only at the first clock edge).
   initial begin
-    rst_aon_n = 1'b0;
+    #1 rst_aon_n = 1'b0;
     repeat (5) @(posedge clk_aon);
     #1 rst_aon_n = 1'b1;
   end

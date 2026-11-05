@@ -55,13 +55,13 @@ package pmu_test_pkg;
     endfunction
 
     function void end_of_elaboration_phase(uvm_phase phase);
-      if (uvm_report_enabled(UVM_HIGH)) uvm_top.print_topology();
+      if (uvm_report_enabled(UVM_HIGH)) uvm_root::get().print_topology();
     endfunction
 
     task run_phase(uvm_phase phase);
       bit ok;
       phase.raise_objection(this);
-      phase.phase_done.set_drain_time(this, 200ns);
+      phase.get_objection().set_drain_time(this, 200ns);
       // cold boot: PMU must bring PD_CPU up after PD_AON reset
       env.tracker.wait_for(PMU_RUN, 5000, ok);
       if (!ok) `uvm_fatal("TEST", "PD_CPU did not reach RUN after reset (cold boot)")

@@ -11,6 +11,12 @@ class axi_lite_driver extends uvm_driver #(axi_lite_item);
   axi_lite_cfg        cfg;
   virtual axi_lite_if vif;
 
+  // Time of the most recent drv_cb clocking event. A synchronous drive issued
+  // in that time step takes effect at that edge; issued later (e.g. when a
+  // sequence produces an item between edges) it would only take effect at
+  // the next edge, so the driver first re-aligns to the clock.
+  protected realtime last_edge = -1;
+
   function new(string name, uvm_component parent);
     super.new(name, parent);
   endfunction
@@ -24,27 +30,35 @@ class axi_lite_driver extends uvm_driver #(axi_lite_item);
   task run_phase(uvm_phase phase);
     axi_lite_item req;
     vif.master_reset();
+    fork
+      forever begin
+        @(vif.drv_cb);
+        last_edge = $realtime;
+      end
+    join_none
     forever begin
       // Hold idle while in reset
       while (vif.aresetn !== 1'b1) begin
         vif.master_reset();
         @(posedge vif.aclk);
       end
-      @(vif.drv_cb);
       seq_item_port.get_next_item(req);
+      if ($realtime != last_edge) @(vif.drv_cb);
       `uvm_info("DRV", {"start ", req.convert2string()}, UVM_HIGH)
-      fork : f_xfer
-        begin
-          if (req.kind == AXI_WRITE) drive_write(req);
-          else                       drive_read(req);
-        end
-        begin
-          @(negedge vif.aresetn);
-          `uvm_warning("DRV", "reset asserted during a transaction; aborted")
-          req.resp = AXI_SLVERR;
-        end
-      join_any
-      disable f_xfer;
+      fork begin
+        fork
+          begin
+            if (req.kind == AXI_WRITE) drive_write(req);
+            else                       drive_read(req);
+          end
+          begin
+            @(negedge vif.aresetn);
+            `uvm_warning("DRV", "reset asserted during a transaction; aborted")
+            req.resp = AXI_SLVERR;
+          end
+        join_any
+        disable fork;
+      end join
       `uvm_info("DRV", {"done  ", req.convert2string()}, UVM_HIGH)
       seq_item_port.item_done();
     end

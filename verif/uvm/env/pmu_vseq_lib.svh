@@ -350,7 +350,15 @@ class pmu_reg_rand_vseq extends pmu_base_vseq;
       bit [31:0]      d;
       case ($urandom_range(5))
         0, 1: begin   // RAL write of a constrained-random value, then read back
-          if (!rg.randomize()) `uvm_fatal("VSEQ", "reg randomize failed")
+          // Retry until the register's own constraints hold. Verilator 5.054
+          // was observed to ignore pmu_reg_dvfs::c_legal when the RAL field
+          // covergroups are built; on a compliant simulator this loop exits
+          // after the first randomize().
+          repeat (16) begin
+            if (!rg.randomize()) `uvm_fatal("VSEQ", "reg randomize failed")
+            if (rg != ral.DVFS || ral.DVFS.OPP.get() < PMU_N_OPP) break;
+          end
+          if (rg == ral.DVFS && ral.DVFS.OPP.get() >= PMU_N_OPP) void'(ral.DVFS.OPP.randomize() with { value < PMU_N_OPP; });
           reg_write(rg, rg.get());
           reg_read(rg, v);
         end
@@ -479,9 +487,10 @@ class pmu_err_vseq extends pmu_base_vseq;
         end
         begin
           // traffic across the PD / PU boundaries as well
+          bit ok;
           fork bg.start(p_sequencer, this); join_none
-          wait (trk.cur != PMU_RUN);
-          wait (trk.cur == PMU_RUN);
+          trk.wait_leave(PMU_RUN, cfg.state_timeout, ok);
+          trk.wait_for(PMU_RUN, cfg.state_timeout, ok);
           bg.stop = 1;
         end
       join

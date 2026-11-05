@@ -28,7 +28,8 @@ class axi_lite_item extends uvm_sequence_item;
   int unsigned         gap;        // idle cycles since previous transaction (same dir)
 
   constraint c_align  { addr[1:0] == 2'b00; }
-  constraint c_strb   { kind == AXI_READ -> strb == 4'hF; soft strb == 4'hF; }
+  constraint c_strb   { kind == AXI_READ -> strb == 4'hF;
+                        strb dist { 4'hF := 9, [4'h0:4'hE] :/ 1 }; }
   constraint c_prot   { soft prot == 3'b000; }
   constraint c_dlymode{ soft dly_mode == AXI_DLY_RANDOM; }
 
