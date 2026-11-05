@@ -1,0 +1,80 @@
+# UART monitor session against the application image (boot arg: monitor).
+# '>' = command sent, '<' = regex expected in its response, '!' = must not appear
+< \[APP\] LPSOC firmware, platform lpsoc, cpu rv32m, boot cold
+< monitor ready
+> help
+< ^  peek
+< ^  run
+< ^  sleep
+> info
+< ^platform lpsoc, cpu rv32m
+< ^boot cold, rst_cause 1
+> peek pmu.id
+< ^0x4000203c: 0x504d5531$
+> peek handoff.rom_version
+< ^0x20000018: 0x00010000$
+> poke 0x20010000 0xcafef00d
+< ^OK$
+> peek 0x20010000 2
+< ^0x20010000: 0xcafef00d$
+< ^0x20010004: 0x[0-9a-f]{8}$
+# uncached alias: the poke reached RAM
+> peek 0x30010000
+< ^0x30010000: 0xcafef00d$
+> poke intc.enable 0x24
+< ^OK$
+> peek intc.enable
+< ^0x40001004: 0x00000024$
+> poke intc.enable 0
+< ^OK$
+> regs pmu
+< ^pmu\.id +0x4000203c: 0x504d5531$
+< ^pmu\.rst_cause +0x40002010: 0x00000001$
+> peek 0x20010001
+< ^ERR alignment$
+> peek nosuch.reg
+< ^ERR address$
+> frobnicate
+< ^ERR unknown command 'frobnicate'$
+> list
+< ^ +42 pm_sleep_resume
+< ^ +14 exc_access_fault +\(unsupported: accfault\)
+> run 10
+< ^\[TEST  10\] exc_ecall +PASS$
+< ^SUITE RESULT: PASS$
+> run 999
+< ^ERR no test 999$
+> run 42
+< ^\[TEST  42\] pm_sleep_resume +PASS$
+> sleep deep 9000
+< ^woke: result 1, rst_cause 3, wake_src 1, off_time [1-9]
+# wake from DEEP_SLEEP by UART RX (intc -> MEIP); the empty line below is
+# the input that wakes the CPU
+> sleep sleep uart
+< ^zzz> 
+< ^woke: result 1, rst_cause 2, wake_src 4, off_time [1-9]
+> 
+> sleep deep uart
+< ^woke: result 1, rst_cause 3, wake_src 4
+> 
+> info
+> opp 2
+< ^opp 2$
+> info
+< ^opp 2,
+> opp 0
+< ^opp 0$
+> run 45
+< ^\[ROM\] LPSOC boot ROM 1\.0, reset cause SW-RESET$
+< ^\[TEST  45\] pm_sw_reset_cold_boot +PASS \(after reboot\)$
+! FAIL
+> regs handoff
+< ^handoff\.boot_status +0x20000004: 0x00000001$
+< ^handoff\.rst_cause +0x20000008: 0x00000004$
+> reset
+< ^resetting CPU domain$
+< ^\[ROM\] LPSOC boot ROM 1\.0, reset cause SW-RESET$
+< ^monitor ready
+> info
+< ^boot cold, rst_cause 4
+> exit 0
