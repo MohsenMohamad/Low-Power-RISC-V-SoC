@@ -50,6 +50,7 @@ class pmu_scoreboard extends uvm_scoreboard;
   protected pmu_state_e  st = PMU_RESET;
   protected pmu_state_e  last_stable = PMU_RESET;
   protected longint unsigned stable_since_cyc;
+  protected longint unsigned left_stable_cyc;   // when the last stable state was left
   protected pmu_pin_ev_e exp_q[$];
   protected bit          mode_deep;
   protected bit          wake_seen;         // enabled wake source seen since entering low power
@@ -357,12 +358,13 @@ class pmu_scoreboard extends uvm_scoreboard;
   protected function void set_state(pmu_state_e s, pwr_obs o);
     if (s == st) return;
     `uvm_info("SB", $sformatf("state %s -> %s @%0t", st.name(), s.name(), o.t), UVM_HIGH)
+    if (pmu_is_stable(st) || st == PMU_RESET) left_stable_cyc = o.cycle;
     if (pmu_is_stable(s) || (s == PMU_RESET)) begin
       if (pmu_is_stable(s)) begin
         pmu_trans_item tr = pmu_trans_item::type_id::create("tr");
         tr.from_st        = last_stable;
         tr.to_st          = s;
-        tr.dwell_cycles   = int'(o.cycle - stable_since_cyc);
+        tr.dwell_cycles   = int'(left_stable_cyc - stable_since_cyc);   // time in from_st only
         tr.wake_during_pd = (s inside {PMU_SLEEP, PMU_DEEP}) && wake_seen_at_off;
         tr.opp_from       = o.dvfs_sel;
         tr.opp_to         = o.dvfs_sel;
@@ -424,7 +426,9 @@ class pmu_scoreboard extends uvm_scoreboard;
     end else if (rg == ral.WAKE_MASK) begin
       sh_mask = t.data[7:0];
     end else if (rg == ral.WAKE_CAUSE) begin
-      cause_possible &= ~t.data[7:0];
+      // A clear that overlapped a wake-up may have executed before the wake
+      // set its bits; keep them possible in that case.
+      if (last_wake_t < t.t_req) cause_possible &= ~t.data[7:0];
     end
   endfunction
 

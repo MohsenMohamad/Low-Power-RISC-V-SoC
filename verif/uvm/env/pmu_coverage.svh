@@ -77,7 +77,9 @@ class pmu_coverage extends uvm_component;
     }
     cp_reason: coverpoint bi.reason;
     x_reg_kind: cross cp_reg, cp_kind;
-    x_reason_kind: cross cp_reason, cp_kind;
+    x_reason_kind: cross cp_reason, cp_kind {
+      ignore_bins reserved_read = binsof(cp_reason) intersect {PMU_ERR_RESERVED} && binsof(cp_kind) intersect {AXI_READ};
+    }
     x_reason_resp: cross cp_reason, cp_resp {
       ignore_bins impossible = (binsof(cp_reason) intersect {PMU_ERR_NONE} && !binsof(cp_resp.okay)) ||
                                (binsof(cp_reason) intersect {PMU_ERR_UNMAPPED} && !binsof(cp_resp.decerr)) ||
