@@ -29,8 +29,8 @@ FW = os.path.join(ROOT, "build", "fw")
 # else skipped is an error, so a broken capability probe cannot hide tests.
 PICO_SKIPS = {14}                                   # no access-fault exceptions
 SPIKE_SKIPS = {23, 24, 30, 31, 32, 33, 34, 35, 41, 42, 43, 44, 45, 46,
-               50, 51, 52, 60, 70, 72, 73}           # no SoC peripherals
-PICO_MIN_PASS = 36
+               50, 51, 52, 60, 61, 70, 72, 73}           # no SoC peripherals
+PICO_MIN_PASS = 37
 SPIKE_MIN_PASS = 17
 
 results = []

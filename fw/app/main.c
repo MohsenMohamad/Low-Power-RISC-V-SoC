@@ -63,21 +63,40 @@ static int cmd_info(int argc, char **argv)
 
 static int cmd_sleep(int argc, char **argv)
 {
-    uint32_t ticks;
+    uint32_t ticks = 0;
     enum pm_state st;
-    if (argc < 3 || parse_u32(argv[2], &ticks)) { puts_("ERR usage: sleep <idle|sleep|deep> <ticks>\n"); return -1; }
+    int uart_wake = argc >= 3 && !strcmp(argv[2], "uart");
+    if (argc < 3 || (!uart_wake && parse_u32(argv[2], &ticks))) {
+        puts_("ERR usage: sleep <idle|sleep|deep> <ticks|uart>\n");
+        return -1;
+    }
     if (!strcmp(argv[1], "idle")) st = PM_IDLE;
     else if (!strcmp(argv[1], "sleep")) st = PM_SLEEP;
     else if (!strcmp(argv[1], "deep")) st = PM_DEEP_SLEEP;
     else { puts_("ERR state\n"); return -1; }
     if (!pmu_present()) { puts_("ERR no PMU\n"); return -1; }
-    uart_flush();
-    pmu_set_wake(PMU_WAKE_MTIP);
-    timer_set_cmp(timer_now() + ticks);
+    if (uart_wake) {
+        /* wake on UART RX: RX interrupt -> intc -> MEIP -> PMU wake */
+        uart_set_ie(UART_IE_RX);
+        intc_enable(INTC_SRC_UART);
+        pmu_set_wake(PMU_WAKE_MEIP);
+        puts_(MON_WAKE_PROMPT);
+        uart_flush();
+    } else {
+        uart_flush();
+        dcache_clean_all();
+        pmu_set_wake(PMU_WAKE_MTIP);
+        timer_set_cmp(timer_now() + ticks);
+    }
     int r = pm_suspend(st, 0);
     timer_cancel();
-    printf_("woke: result %d, rst_cause %u, off_time %u\n", r,
-            (unsigned)pmu_rst_cause(), (unsigned)pmu_read(PMU_OFF_TIME));
+    uart_set_ie(0);
+    intc_disable(INTC_SRC_UART);
+    pmu_set_wake(0);
+    if (uart_wake) putch('\n');
+    printf_("woke: result %d, rst_cause %u, wake_src %u, off_time %u\n", r,
+            (unsigned)pmu_rst_cause(), (unsigned)pmu_read(PMU_WAKE_SRC),
+            (unsigned)pmu_read(PMU_OFF_TIME));
     return r < 0;
 }
 
@@ -102,7 +121,7 @@ static const mon_cmd_t app_cmds[] = {
     {"list",  "",                  "list validation tests",      cmd_list},
     {"run",   "<id|all>",          "run test(s)",                cmd_run},
     {"info",  "",                  "boot / platform information", cmd_info},
-    {"sleep", "<idle|sleep|deep> <t>", "enter power state for t mtime ticks", cmd_sleep},
+    {"sleep", "<state> <t|uart>",  "idle|sleep|deep for t ticks or until UART input", cmd_sleep},
     {"opp",   "<0..2>",            "set CPU operating point",    cmd_opp},
     {"exit",  "[code]",            "end simulation",             cmd_exit},
 };

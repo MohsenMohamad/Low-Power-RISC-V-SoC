@@ -333,3 +333,55 @@ static int t_stress(void)
     return TEST_PASS;
 }
 TEST(60, "stress_sleep_wake_dvfs", CAP_PMU | CAP_DVFS | CAP_BOOTROM | CAP_CLINT, t_stress);
+
+/* Deterministic coverage of every power state at every operating point and
+ * of every OPP -> OPP transition. Prints the coverage matrix. */
+static int t_coverage(void)
+{
+    static const char *names[] = {"IDLE ", "SLEEP", "DEEP "};
+    uint8_t cov[3][PMU_NUM_OPP] = {{0}};
+    uint8_t dv[PMU_NUM_OPP][PMU_NUM_OPP] = {{0}};
+    uint32_t c_dvfs = pmu_read(PMU_CNT_DVFS);
+    unsigned n_dvfs = 0;
+
+    for (uint32_t from = 0; from < PMU_NUM_OPP; from++)
+        for (uint32_t to = 0; to < PMU_NUM_OPP; to++) {
+            if (from == to) continue;
+            if (pmu_cur_op() != from) { CHECK_EQ(pm_set_opp(from), 0); n_dvfs++; }
+            CHECK_EQ(pm_set_opp(to), 0);
+            n_dvfs++;
+            CHECK_EQ(pmu_cur_op(), to);
+            dv[from][to] = 1;
+        }
+    for (uint32_t op = 0; op < PMU_NUM_OPP; op++) {
+        if (pmu_cur_op() != op) { CHECK_EQ(pm_set_opp(op), 0); n_dvfs++; }
+        for (int st = PM_IDLE; st <= PM_DEEP_SLEEP; st++) {
+            uint32_t ticks = st == PM_IDLE ? 600u : (SLEEP_TICKS << op);
+            int r = sleep_for((enum pm_state)st, ticks);
+            CHECK_EQ(r, st == PM_IDLE ? PM_WOKE : PM_RESUMED);
+            CHECK_EQ(pmu_cur_op(), op);           /* OPP survives power-down */
+            if (st != PM_IDLE)
+                CHECK_EQ(pmu_rst_cause(), st == PM_SLEEP ? PMU_RC_SLEEP : PMU_RC_DEEP);
+            cov[st][op] = 1;
+        }
+    }
+    CHECK_EQ(pm_set_opp(0), 0);
+    n_dvfs++;
+    CHECK_EQ(pmu_read(PMU_CNT_DVFS) - c_dvfs, n_dvfs);
+
+    puts_("    state x OPP   OP0 OP1 OP2      DVFS from\\to  OP0 OP1 OP2\n");
+    for (int st = 0; st < 3; st++) {
+        printf_("    %s        ", names[st]);
+        for (int op = 0; op < PMU_NUM_OPP; op++) printf_(" %s ", cov[st][op] ? " x" : " -");
+        printf_("     OP%d          ", st);
+        for (int op = 0; op < PMU_NUM_OPP; op++) printf_(" %s ", st == op ? " ." : dv[st][op] ? " x" : " -");
+        putch('\n');
+    }
+    for (int st = 0; st < 3; st++)
+        for (int op = 0; op < PMU_NUM_OPP; op++) {
+            CHECK(cov[st][op]);
+            CHECK(st == op || dv[st][op]);
+        }
+    return TEST_PASS;
+}
+TEST(61, "pm_state_opp_coverage", CAP_PMU | CAP_DVFS | CAP_BOOTROM | CAP_CLINT, t_coverage);

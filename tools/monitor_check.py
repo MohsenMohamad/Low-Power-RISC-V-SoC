@@ -17,6 +17,7 @@ import re
 import sys
 
 PROMPT = "mon> "
+WAKE_PROMPT = "zzz> "   # firmware sleeps until UART input; the next line wakes it
 
 
 def parse(spec_path):

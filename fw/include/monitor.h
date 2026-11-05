@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 
-#define MON_PROMPT "mon> "
+#define MON_PROMPT      "mon> "
+#define MON_WAKE_PROMPT "zzz> "     /* printed before sleeping until UART input */
 
 typedef struct {
     const char *name;
