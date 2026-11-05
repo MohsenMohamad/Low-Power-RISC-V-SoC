@@ -56,6 +56,7 @@ def expect_pass(cid, cmd, cwd=ROOT, timeout=3600):
 
 
 def script(path, body):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("#!" + PY + "\n" + body)
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
@@ -161,10 +162,10 @@ def t_mutation(d, verilator):
 
 def t_runners(d):
     # run_cosim: a simulator that exits 0 without "[tb] PASS", and one that says PASS but exits 1
-    nopass = script(f"{d}/rc/nopass", "print('[tb] cycles=1 retired=1 traps=0 irqs=0')\n")
-    badexit = script(f"{d}/rc/badexit", "import sys\nprint('[tb] PASS')\nsys.exit(1)\n")
+    nopass = script(f"{d}/rc/bin/nopass", "print('[tb] cycles=1 retired=1 traps=0 irqs=0')\n")
+    badexit = script(f"{d}/rc/bin/badexit", "import sys\nprint('[tb] PASS')\nsys.exit(1)\n")
     for cid, b in (("run_cosim/exit0-without-pass", nopass), ("run_cosim/pass-with-nonzero-exit", badexit)):
-        expect_fail(cid, f"{PY} scripts/run_cosim.py --bin {b} --seeds 1 --directed 0 --jobs 1 --out {d}/rc/{os.path.basename(b)}",
+        expect_fail(cid, f"{PY} scripts/run_cosim.py --bin {b} --seeds 1 --directed 0 --jobs 1 --out {d}/rc/out_{os.path.basename(b)}",
                     "COSIM: 0/1 seeds passed")
     # run_archtest: DUT signature differs from the Spike reference
     wrongsig = script(f"{d}/ra/wrongsig", "import sys\n"
@@ -203,7 +204,8 @@ def t_pmu(d, verilator):
     if rc:
         record("tb_pmu/vsel-mutant", False, "(mutant bench did not build)\n" + out[-400:])
     else:
-        expect_fail("tb_pmu/vsel-mutant", f"{t}/obj/Vtb_pmu +episodes=200", "a_vsel_sufficient", cwd=t)
+        # caught by any PMU SVA (a_vsel_sufficient / a_dvfs_vup) or the reference model
+        expect_fail("tb_pmu/vsel-mutant", f"{t}/obj/Vtb_pmu +episodes=200", "Assertion failed in tb_pmu", cwd=t)
     shutil.copytree(os.path.join(ROOT, "formal"), f"{t}/formal", dirs_exist_ok=True)
     expect_fail("formal_pmu/vsel-mutant", f"sby -f -d {t}/sby_prove pmu.sby prove", "Assert failed", cwd=f"{t}/formal")
 
@@ -217,12 +219,14 @@ def main():
     d = os.path.abspath(a.out)
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
-    t_check_results(d)
-    t_check_soc_cov(d)
-    t_cov_report(d, os.path.abspath(a.build))
-    t_runners(d)
-    t_pmu(d, a.verilator)
-    t_mutation(d, a.verilator)
+    groups = [("check_results", lambda: t_check_results(d)), ("check_soc_cov", lambda: t_check_soc_cov(d)),
+              ("cov_report", lambda: t_cov_report(d, os.path.abspath(a.build))), ("runners", lambda: t_runners(d)),
+              ("pmu", lambda: t_pmu(d, a.verilator)), ("mutation", lambda: t_mutation(d, a.verilator))]
+    for name, fn in groups:
+        try:
+            fn()
+        except Exception as e:   # a crashing self-test is a failure, never a skip
+            record(f"{name}/crash", False, repr(e))
     json.dump(RESULTS, open(os.path.join(d, "results.json"), "w"), indent=1)
     bad = [r["id"] for r in RESULTS if r["status"] != "PASS"]
     print(f"SELFTEST: {len(RESULTS) - len(bad)}/{len(RESULTS)} negative tests detected the injected failure"

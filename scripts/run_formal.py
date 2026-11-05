@@ -44,7 +44,7 @@ def main():
         open(os.path.join(out, f"{f}_{t}.log"), "w").write(log)
         status = "PASS" if (rc == 0 and re.search(r"DONE \(PASS", log)
                             and "Unreached cover" not in log) else "FAIL"
-        reached = len(re.findall(r"Reached cover statement", log))
+        reached = len(set(re.findall(r"Reached cover statement at (\S+)", log)))
         info = f"{reached} cover statements reached" if t == "cover" else \
             ("; ".join(sorted(set(m for m in re.findall(r"summary: (.*successful proof.*)", log)))) or "")
         print(f"  {job:22s} {status}  {time.time() - t0:6.0f}s  {info}")

@@ -100,8 +100,11 @@ MUTANTS = [
      "            wb_err_q   <= evict_err_q;   // lost eviction data is reported by this op",
      "            wb_err_q   <= 1'b0;",
      "D$ eviction write-back error not reported by the next maintenance op (W35)", True),
+    # (Removing only one of the two write-back state terms is an equivalent
+    # mutant: each term alone keeps cache_clean low during a write-back.)
     ("dc_clean_during_evict", "rtl/cache/dcache.sv",
-     "                 !(state_q inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&\n",
+     "                 !(state_q inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&\n"
+     "                 !(state_d inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&\n",
      "",
      "D$ reports clean while an eviction write-back is still in flight", True),
 ]

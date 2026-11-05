@@ -113,7 +113,8 @@ int main(int argc, char** argv) {
   int idle_pct = int(plus_u64("idle_pct", 50));
   std::mt19937 idle_rng(uint32_t(seed * 104729 + 7));
   enum { IH_OFF, IH_WAIT_ACK, IH_HOLD, IH_WAIT_DROP } ih = IH_OFF;
-  int ih_cnt = 0;
+  int ih_cnt = 0, ih_irq_at = -1;
+  int rd_outst = 0, wr_outst = 0;   // accepted AXI requests without response
   uint64_t idle_handshakes = 0;
   bool prev_sleep = false;
 
@@ -143,11 +144,16 @@ int main(int argc, char** argv) {
         }
         break;
       case IH_WAIT_ACK:
-        if (top->idle_ack_o) { ih = IH_HOLD; ih_cnt = 4 + int(idle_rng() % 60); idle_handshakes++; }
+        if (top->idle_ack_o) {
+          ih = IH_HOLD; ih_cnt = 4 + int(idle_rng() % 60); idle_handshakes++;
+          ih_irq_at = (idle_rng() % 4) ? 1 + int(idle_rng() % ih_cnt) : -1;
+        }
         else if (++ih_cnt > 64) { failed = true; fail_msg = "idle_ack not given within 64 cycles"; }
         break;
       case IH_HOLD:
-        if (ih_cnt == 2 && (idle_rng() & 1)) irq_src |= 1u << (idle_rng() % 3);  // wake race
+        // wake race: in 3 of 4 handshakes all interrupt lines rise while the
+        // core is acknowledged; it must stay in WFI until idle_req falls
+        if (ih_cnt == ih_irq_at) irq_src |= 7;
         if (--ih_cnt <= 0) { top->idle_req_i = 0; ih = IH_WAIT_DROP; ih_cnt = 0; }
         break;
       case IH_WAIT_DROP:
@@ -174,10 +180,18 @@ int main(int argc, char** argv) {
     pins.rready = top->m_rready;
     mem.sample(pins);
 
+    // While idle_ack is high: no commit, no new AXI request and no transaction
+    // still in flight (doc/CPU_SOC_INTERFACE.md: no outstanding bus transaction).
     if (top->rst_n && top->idle_ack_o &&
-        (top->trace_valid_o || top->m_arvalid || top->m_awvalid || top->m_wvalid)) {
+        (top->trace_valid_o || top->m_arvalid || top->m_awvalid || top->m_wvalid ||
+         rd_outst > 0 || wr_outst > 0)) {
       failed = true;
-      fail_msg = "activity while idle_ack is asserted at cycle " + std::to_string(cycle);
+      fail_msg = "activity while idle_ack is asserted at cycle " + std::to_string(cycle) +
+                 " (outstanding rd=" + std::to_string(rd_outst) + " wr=" + std::to_string(wr_outst) + ")";
+    }
+    if (top->rst_n) {
+      rd_outst += int(top->m_arvalid && pins.arready) - int(pins.rvalid && top->m_rready);
+      wr_outst += int(top->m_awvalid && pins.awready) - int(pins.bvalid && top->m_bready);
     }
 
     if (top->rst_n && top->trace_valid_o && !done) {
