@@ -11,6 +11,11 @@ not run or not passing here) / **passing** (run in this environment, see
 evidence). Statuses of other areas are what was observed when their branch
 was merged here, not their own claims.
 
+Last full regression (`tools/regress.py --unit-seeds 3 --seeds 8`): 55 tests,
+54 pass, 1 fail (Session 3 `run_tests.py`: its Verilator lint step, see
+section 1); debug RTL line coverage 93.1 %, toggle 54.5 %, 50 of 52 cover
+properties hit (open: `c_ovf`, `c_stop_pwr`). Bench demo: 11/11 steps pass.
+
 Evidence runs (2026-11-05, Verilator 5.054, Spike 1.1.1-dev, riscv64-unknown-elf-gcc 13.2 and clang 18):
 `tools/regress.py` (debug suites + random stress seeds), `tools/run_tests.py`
 (Session 3, through the regression runner), `tools/bench/sequencer.py` (bench demo).
@@ -75,10 +80,10 @@ tools), `make -C verif/debug run-test TEST=<t> SEED=<n>`, `python3 tools/run_tes
 | Feature (DEBUG_SPEC.md) | Tests | Coverage points | Status |
 |---|---|---|---|
 | Trace buffer: circular capture of PC/insn/timestamp | `trace_rand` (reference model, random clock ratios), `integ_drv`, `integ_divtest` | `c_wrap`, `c_fifo2`, `c_ret_trap` | passing |
-| Trace triggers start/stop on PC, exception, power change | `trace_rand` random trigger configs; `dbg_trace_sva` `a_start*`, `a_stop`, `a_armed_wait`; `integ_drv` (PC start/stop on real CPU) | `c_start_{none,pc,exc,pwr}`, `c_stop_{pc,exc,pwr}` | passing; `c_stop_exc`, `c_stop_pwr` hit only with more seeds (missed in the 1-seed regression) |
+| Trace triggers start/stop on PC, exception, power change | `trace_rand` random trigger configs; `dbg_trace_sva` `a_start*`, `a_stop`, `a_armed_wait`; `integ_drv` (PC start/stop on real CPU) | `c_start_{none,pc,exc,pwr}`, `c_stop_{pc,exc,pwr}` | passing; `c_stop_pwr` not hit by the 3-seed regression (stop on power change exercised only through the model); open |
 | Trace freeze on error | `a_frz_exc`, `a_frz_err`, `a_frz_sticky`, `a_frz_no_new`; `subsys_wdt_chain`; `integ_drv`; `integ_hang` (frozen by watchdog, survives PD_CPU reset) | `c_frz_exc`, `c_frz_err` | passing |
 | Trace readable with PD_CPU off | `trace_pwroff`, `integ_drv` ("trace intact across SLEEP") | - | passing |
-| Event counters I$/D$ hit/miss, stall, time per state, wakes, DVFS | `evcnt_rand`, `evcnt_pwr` (cycle-exact AON model), `integ_drv`, bench power/DVFS steps | `c_wake_sleep`, `c_wake_dsleep`, `c_idle`, `c_dvfs_chg`, `c_clear_pend`, `c_ovf`, `c_frz_err` | passing; `c_ovf` (32-bit wrap) not reached by simulation length, `c_frz_err` missed in 1-seed run |
+| Event counters I$/D$ hit/miss, stall, time per state, wakes, DVFS | `evcnt_rand`, `evcnt_pwr` (cycle-exact AON model), `integ_drv`, bench power/DVFS steps | `c_wake_sleep`, `c_wake_dsleep`, `c_idle`, `c_dvfs_chg`, `c_clear_pend`, `c_ovf`, `c_frz_err` | passing; `c_ovf` (32-bit counter wrap) not reached in simulation: open, needs a directed test with a preloaded counter |
 | Counter freeze / clear | `evcnt_rand`, `a_frozen_hold` | - | passing |
 | Error log: last exception, power transition + result, sticky across sleep | `errlog_rand` (incl. power-off periods), `a_sticky`, `a_pwr_err`; `integ_crash_*` | `c_set`/`c_clr` per bit, `c_ovr`, `c_keep_first`, `c_res1..3` | passing |
 | Watchdog: bark, bite, log then PD_CPU reset, pause in sleep, lock | `wdt_rand`, `wdt_lock` (cycle-exact model), SVA `a_log_first`, `a_rst_pulse`, `a_pause`, `a_lock*`, `a_rst_stops`; `subsys_wdt_chain`; `integ_hang` (real reboot) | `c_bite_ack`, `c_bite_to`, `c_rst`, `c_bark`, `c_paused`, `c_lock`, `c_rst_stop` | passing |

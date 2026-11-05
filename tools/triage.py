@@ -59,6 +59,10 @@ def classify(t):
         if m:
             line = re.sub(r"0x[0-9a-fA-F]+|\d+", "N", m.group(1).strip())[:100]
             return {"reason": "error", "message": line}, path
+        # step tables of other areas' runners: "<step name>   FAIL  ..."
+        steps = re.findall(r"^\s*(\S.*?)\s{2,}FAIL\b", text, re.M)
+        if steps:
+            return {"reason": "error", "message": "failing step(s): " + "; ".join(sorted(set(steps)))}, path
     return {"reason": "unknown", "detail": t.get("detail", "")}, t.get("log")
 
 
