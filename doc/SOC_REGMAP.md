@@ -121,7 +121,7 @@ STATUS fields:
 | [16]  | RESUME      | W1C  | CPU was powered up from SLEEP or DEEP_SLEEP |
 | [17]  | RESUME_DEEP | W1C  | ... and the power-down was DEEP_SLEEP |
 | [18]  | DVFS_DONE   | W1C  | A DVFS sequence completed |
-| [19]  | ERR_DIRTY   | W1C  | A power-down was refused because the D-cache reported dirty lines |
+| [19]  | ERR_DIRTY   | W1C  | A power-down was refused because the D-cache reported dirty lines; the CPU was kept in IDLE instead |
 
 PMU FSM state encoding: 0 RUN, 1 IDLE_REQ, 2 CLK_GATE, 3 IDLE, 4 DVFS_VUP,
 5 DVFS_SWITCH, 6 DVFS_VDN, 7 BUS_DRAIN, 8 ISO_ON, 9 PWR_OFF, 10 OFF,

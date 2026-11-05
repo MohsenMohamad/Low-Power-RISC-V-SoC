@@ -1,16 +1,16 @@
 [tasks]
-bmc
+prove
 cover
 
 [options]
 multiclock on
-bmc: mode bmc
-bmc: depth 36
+prove: mode prove
 cover: mode cover
-cover: depth 60
+cover: depth 40
 
 [engines]
-smtbmc z3
+prove: abc pdr
+cover: smtbmc z3
 
 [script]
 read_verilog -sv -formal -I. tech_sync.sv cdc_async_fifo.sv async_fifo_formal.sv

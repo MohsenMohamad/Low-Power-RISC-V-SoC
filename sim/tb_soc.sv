@@ -214,7 +214,7 @@ module tb_soc #(
       0: arc = {5'd0, 5'd1};    1: arc = {5'd1, 5'd2};    2: arc = {5'd1, 5'd18};
       3: arc = {5'd2, 5'd3};    4: arc = {5'd2, 5'd7};    5: arc = {5'd3, 5'd4};
       6: arc = {5'd3, 5'd17};   7: arc = {5'd4, 5'd5};    8: arc = {5'd5, 5'd6};
-      9: arc = {5'd6, 5'd3};   10: arc = {5'd7, 5'd8};   11: arc = {5'd7, 5'd17};
+      9: arc = {5'd6, 5'd3};   10: arc = {5'd7, 5'd8};   11: arc = {5'd7, 5'd3};
      12: arc = {5'd8, 5'd9};   13: arc = {5'd9, 5'd10};  14: arc = {5'd10, 5'd11};
      15: arc = {5'd10, 5'd12}; 16: arc = {5'd11, 5'd12}; 17: arc = {5'd12, 5'd13};
      18: arc = {5'd13, 5'd14}; 19: arc = {5'd14, 5'd15}; 20: arc = {5'd15, 5'd16};
@@ -291,7 +291,7 @@ module tb_soc #(
     end
   end
 
-  task automatic latency_report(input int fd);
+  function automatic void latency_report(input int fd);
     $fdisplay(fd, "== Power-state latency (ns): clk_aon 41 ns, clk_cpu OP0/1/2 47/23/11 ns ==");
     for (int k = 0; k < 3; k++) begin
       if (lat_ent_n[k] > 0)
@@ -302,7 +302,7 @@ module tb_soc #(
         $fdisplay(fd, "  %-10s wake   (wake event -> PMU RUN)       n=%0d min=%0.0f max=%0.0f avg=%0.0f",
                   psn(k + 1), lat_wak_n[k], lat_wak_min[k], lat_wak_max[k], lat_wak_sum[k] / lat_wak_n[k]);
     end
-  endtask
+  endfunction
 
   int arc_hits [NARC];
   int illegal_arcs;

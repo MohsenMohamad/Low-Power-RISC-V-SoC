@@ -28,7 +28,8 @@
 // DVFS_SWITCH (glitch-free clock mux), DVFS_VDN (lower voltage after going
 // slower), then back to IDLE and DVFS_DONE is raised (interrupt source).
 // Safety aborts: IDLE_REQ -> WAKE_REL if the core left WFI before
-// acknowledging; BUS_DRAIN -> CLK_UNGATE (STATUS.ERR_DIRTY) if the core
+// acknowledging; BUS_DRAIN -> IDLE (STATUS.ERR_DIRTY, the power-down is
+// refused and the core stays clock gated until the wake event) if the core
 // reports dirty caches at power-down.
 //
 // Register map (offsets):
@@ -191,7 +192,7 @@ module pmu #(
       ST_DVFS_VDN:
         if (!vwait_q || cnt_q >= 16'(VSETTLE_CYCLES)) state_d = ST_IDLE;
       ST_BUS_DRAIN:
-        if (!cache_clean_i)  state_d = ST_CLK_UNGATE;       // refuse: dirty
+        if (!cache_clean_i)  state_d = ST_IDLE;   // refuse power-down: stay clock gated
         else if (bus_idle_i) state_d = ST_ISO_ON;
       ST_ISO_ON:
         if (cnt_q >= 16'(ISO_CYCLES) && !cpu_rst_ack_i) state_d = ST_PWR_OFF;
@@ -330,7 +331,7 @@ module pmu #(
       if ((state_q == ST_IDLE && state_d == ST_CLK_UNGATE) ||
           (state_q == ST_OFF  && state_d != ST_OFF))
         wake_cause_q <= {msip_i, mtip_i, meip_i};
-      if (state_q == ST_BUS_DRAIN && state_d == ST_CLK_UNGATE) st_err_dirty_q <= 1'b1;
+      if (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) st_err_dirty_q <= 1'b1;
       if (state_q == ST_PWR_OFF && state_d == ST_OFF) sleep_cnt_q <= sleep_cnt_q + 32'd1;
       if (state_q == ST_RST_REL && state_d == ST_ISO_OFF) begin
         st_resume_q      <= 1'b1;
@@ -430,8 +431,15 @@ module pmu #(
 
   // Per-state control outputs {sw_en, iso_en, rst_n, cg_en, ret} (the full
   // sequencing contract; also the inductive invariant for the formal proof).
+`ifdef SVA_ON
+  `define PMU_CTL_USED
+`elsif FORMAL
+  `define PMU_CTL_USED
+`endif
+`ifdef PMU_CTL_USED
   logic [4:0] ctl;
   assign ctl = {pwr_sw_en_q, iso_en_q, cpu_rst_n_q, cg_en_q, ram_ret_q};
+`endif
   `SVA_ASSERT_IMP(a_ctl_run,      clk_i, rst_ni, state_q == ST_RUN || state_q == ST_IDLE_REQ ||
                                   state_q == ST_CLK_UNGATE || state_q == ST_WAKE_REL, ctl == 5'b10110)
   `SVA_ASSERT_IMP(a_ctl_gated,    clk_i, rst_ni, (state_q == ST_CLK_GATE || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_OFF), ctl == 5'b10100)
@@ -470,7 +478,7 @@ module pmu #(
   `SVA_COVER(c_switch_vdn,       clk_i, rst_ni, state_q == ST_DVFS_SWITCH && state_d == ST_DVFS_VDN)
   `SVA_COVER(c_vdn_idle,         clk_i, rst_ni, state_q == ST_DVFS_VDN    && state_d == ST_IDLE)
   `SVA_COVER(c_drain_iso,        clk_i, rst_ni, state_q == ST_BUS_DRAIN   && state_d == ST_ISO_ON)
-  `SVA_COVER(c_drain_dirty,      clk_i, rst_ni, state_q == ST_BUS_DRAIN   && state_d == ST_CLK_UNGATE)
+  `SVA_COVER(c_drain_dirty,      clk_i, rst_ni, state_q == ST_BUS_DRAIN   && state_d == ST_IDLE)
   `SVA_COVER(c_iso_pwroff,       clk_i, rst_ni, state_q == ST_ISO_ON      && state_d == ST_PWR_OFF)
   `SVA_COVER(c_pwroff_off,       clk_i, rst_ni, state_q == ST_PWR_OFF     && state_d == ST_OFF)
   `SVA_COVER(c_off_ret_exit,     clk_i, rst_ni, state_q == ST_OFF         && state_d == ST_RET_EXIT)
