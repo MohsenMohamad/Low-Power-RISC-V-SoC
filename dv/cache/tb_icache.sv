@@ -30,6 +30,7 @@ module tb_icache;
     .idle_o ()
   );
   assign cif.wb_err = 1'b0;
+  assign cif.cache_clean = 1'b1;
 
   // ---------------------------------------------------------------------------
   // SVA

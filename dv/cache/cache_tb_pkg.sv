@@ -260,6 +260,16 @@ package cache_tb_pkg;
       repeat (n) @(negedge vif.clk);
     endtask
 
+    // Maintenance whose write-back is expected to fail: no coherence check.
+    task maint_nocheck(bit inval);
+      @(negedge vif.clk);
+      vif.req = 0; vif.maint_req = 1; vif.maint_inval = inval;
+      forever begin #1; if (vif.maint_done) break; @(negedge vif.clk); end
+      @(negedge vif.clk);
+      vif.maint_req = 0;
+      n_maint++;
+    endtask
+
     // One maintenance operation (D$: clean / flush, I$: invalidate).
     task maint(bit inval, bit sync = 1);
       if (sync) @(negedge vif.clk);   // sync=0: caller is already at a negedge
@@ -274,6 +284,9 @@ package cache_tb_pkg;
       @(negedge vif.clk);
       vif.maint_req = 0;
       n_maint++;
+      // A maintenance operation without write-back error leaves no dirty line.
+      if (!icache && vif.wb_err === 1'b0 && vif.cache_clean !== 1'b1)
+        fail("cache_clean low after an error-free clean/flush");
       if (!icache) check_memory();
       else stale.delete();
     endtask

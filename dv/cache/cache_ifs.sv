@@ -25,4 +25,5 @@ interface cache_if (input logic clk);
   logic        rvalid, err;
   logic        maint_req, maint_inval, maint_done;   // D$: clean/flush, I$: invalidate
   logic        wb_err;
+  logic        cache_clean;                         // D$: no dirty line
 endinterface

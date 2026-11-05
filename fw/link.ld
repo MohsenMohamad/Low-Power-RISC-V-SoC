@@ -18,6 +18,7 @@ SECTIONS
 
   .data : {
     _data_start = .;
+    *(.ramtext .ramtext.*)          /* code executed from RAM (copied at cold boot) */
     *(.data .data.* .sdata .sdata.*)
     . = ALIGN(4);
     _data_end = .;
@@ -31,6 +32,10 @@ SECTIONS
     _bss_end = .;
   } > RAM
 
-  _stack_top = ORIGIN(RAM) + LENGTH(RAM);
+  /* The last 256 bytes of RAM are never touched by the boot code (no .data,
+   * .bss or stack): firmware keeps state across cold reboots there, accessed
+   * through the uncached alias. */
+  _persist = ORIGIN(RAM) + LENGTH(RAM) - 256;
+  _stack_top = _persist;
   /DISCARD/ : { *(.comment) *(.riscv.attributes) *(.note*) *(.eh_frame*) }
 }

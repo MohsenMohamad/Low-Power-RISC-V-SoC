@@ -18,7 +18,7 @@ module tb_dcache;
     .req_i (cif.req), .gnt_o (cif.gnt), .addr_i (cif.addr), .we_i (cif.we), .be_i (cif.be),
     .wdata_i (cif.wdata), .rvalid_o (cif.rvalid), .rdata_o (cif.rdata), .err_o (cif.err),
     .maint_req_i (cif.maint_req), .maint_inval_i (cif.maint_inval),
-    .maint_done_o (cif.maint_done), .wb_err_o (cif.wb_err),
+    .maint_done_o (cif.maint_done), .wb_err_o (cif.wb_err), .cache_clean_o (cif.cache_clean),
     .m_awvalid (axi.awvalid), .m_awready (axi.awready), .m_awaddr (axi.awaddr), .m_awprot (axi.awprot),
     .m_wvalid (axi.wvalid), .m_wready (axi.wready), .m_wdata (axi.wdata), .m_wstrb (axi.wstrb),
     .m_bvalid (axi.bvalid), .m_bready (axi.bready), .m_bresp (axi.bresp),
@@ -147,6 +147,27 @@ module tb_dcache;
   axil_slave  slv;
   cache_agent agt;
 
+  // Directed single accesses (no outstanding request may be pending).
+  task automatic direct_store(input bit [31:0] a, input bit [31:0] d);
+    @(negedge clk);
+    cif.req = 1; cif.addr = a; cif.we = 1; cif.be = 4'hF; cif.wdata = d;
+    do begin #1; if (!cif.gnt) @(negedge clk); end while (!cif.gnt);
+    @(negedge clk); cif.req = 0;
+    while (!cif.rvalid) begin #1; if (!cif.rvalid) @(negedge clk); end
+    if (cif.err) agt.fail($sformatf("directed store error at %h", a));
+    agt.refm[a] = d;
+  endtask
+  task automatic direct_load(input bit [31:0] a, output bit [31:0] d);
+    @(negedge clk);
+    cif.req = 1; cif.addr = a; cif.we = 0; cif.be = 4'hF;
+    do begin #1; if (!cif.gnt) @(negedge clk); end while (!cif.gnt);
+    @(negedge clk); cif.req = 0;
+    while (!cif.rvalid) begin #1; if (!cif.rvalid) @(negedge clk); end
+    d = cif.rdata;
+    if (cif.err) agt.fail($sformatf("directed load error at %h", a));
+    else if (d != agt.model(a)) agt.fail($sformatf("directed load %h got %h exp %h", a, d, agt.model(a)));
+  endtask
+
   initial begin
     int unsigned seed;
     int n;
@@ -177,31 +198,46 @@ module tb_dcache;
     agt.traffic(n / 4, 15);
     agt.tx.hot_only = 0;
     agt.tx.c_region.constraint_mode(1);
-    // 4. directed write-back error: dirty a line, poison its writes, clean
+    // 4. directed write-back errors (doc/SPEC.md cache maintenance, W35)
+    //   4a. clean with a failing write-back: error reported, the line stays
+    //       dirty (cache_clean low); a retry without the fault writes it back.
     begin
-      bit [31:0] a = CACHE_BASE + 32'h0000_3F00;
-      cache_txn t = new();
+      bit [31:0] a;
       agt.maint(1);
-      t.region = R_RANDOM; t.we = 1; t.size = 2; t.boff = 0; t.wdata = 32'hDEAD_BEEF;
-      t.tag = 6'd7; t.set = 7'h70; t.word = 0; t.gap = 0; t.retract = 0;
-      t.finalize(0);
-      a = t.addr;
-      // drive the single store directly
-      @(negedge clk);
-      cif.req = 1; cif.addr = t.addr; cif.we = 1; cif.be = 4'hF; cif.wdata = t.wdata;
-      do begin #1; if (!cif.gnt) @(negedge clk); end while (!cif.gnt);
-      @(negedge clk); cif.req = 0;
-      while (!cif.rvalid) begin #1; if (!cif.rvalid) @(negedge clk); end
-      agt.check(t, cif.rdata, cif.err);
+      a = CACHE_BASE + {15'b0, 6'd7, 7'h70, 2'd0, 2'b00};
+      direct_store(a, 32'hDEAD_BEEF);
       slv.wr_poison[{a[31:4], 4'h0}] = 1;
-      for (int i = 0; i < 4; i++) agt.lost[{a[31:4], 4'h0} + 4 * i] = 1;
-      agt.maint(0);
+      agt.maint_nocheck(0);
       if (cif.wb_err !== 1'b1) agt.fail("wb_err not reported after failed write-back");
+      if (cif.cache_clean !== 1'b0) agt.fail("cache_clean high although a write-back failed");
+      if (slv.peek(a) == 32'hDEAD_BEEF) agt.fail("poisoned write-back reached memory");
       slv.wr_poison.delete();
-      agt.maint(0);
-      if (cif.wb_err !== 1'b0) agt.fail("wb_err not cleared by next maintenance");
-      agt.tx = new();
+      agt.maint(0);   // retry: must write the still-dirty line, memory checked by maint()
+      if (cif.wb_err !== 1'b0) agt.fail("wb_err not cleared by an error-free retry");
+      if (cif.cache_clean !== 1'b1) agt.fail("cache_clean low after successful retry");
+      if (slv.peek(a) != 32'hDEAD_BEEF) agt.fail("retry did not write the dirty line back");
     end
+    //   4b. failed eviction write-back (data lost): the next maintenance
+    //       operation must report it even though it starts after the error.
+    begin
+      bit [31:0] a, b, c;
+      bit [31:0] rd;
+      a = CACHE_BASE + {15'b0, 6'd9, 7'h31, 2'd1, 2'b00};
+      b = CACHE_BASE + {15'b0, 6'd10, 7'h31, 2'd0, 2'b00};
+      c = CACHE_BASE + {15'b0, 6'd11, 7'h31, 2'd0, 2'b00};
+      agt.maint(1);
+      direct_store(a, 32'h0BAD_F00D);           // dirty line in set 0x31
+      slv.wr_poison[{a[31:4], 4'h0}] = 1;
+      direct_load(b, rd);                       // other way
+      direct_load(c, rd);                       // evicts a's line (LRU) -> write-back fails
+      for (int i = 0; i < 4; i++) agt.lost[{a[31:4], 4'h0} + 4 * i] = 1;
+      slv.wr_poison.delete();
+      agt.maint_nocheck(0);
+      if (cif.wb_err !== 1'b1) agt.fail("eviction write-back error not reported by next clean");
+      agt.maint(0);
+      if (cif.wb_err !== 1'b0) agt.fail("eviction error reported twice");
+    end
+    agt.tx = new();
     // 5. mixed traffic with random latency, then final flush + full compare
     slv.ready_pct = 75; slv.max_lat = 3;
     agt.traffic(n / 4, 10);

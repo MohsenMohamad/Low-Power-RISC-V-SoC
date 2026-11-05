@@ -2,13 +2,22 @@
 #ifndef SOC_H
 #define SOC_H
 
-#define ROM_BASE        0x00000000u
-#define RAM_BASE        0x10000000u
-#define UART_BASE       0x20000000u
-#define MTIMER_BASE     0x20001000u
-#define INTC_BASE       0x20002000u
-#define PMU_BASE        0x20003000u
-#define WTIMER_BASE     0x20004000u
+/* Unsigned-constant helper usable from C and assembler. */
+#ifdef __ASSEMBLER__
+#define _U(x) x
+#else
+#define _U(x) x##u
+#endif
+
+#define ROM_BASE        _U(0x00000000)
+#define RAM_BASE        _U(0x10000000)
+#define RAM_SIZE        _U(0x00020000)
+#define RAM_ALIAS_BASE  _U(0x30000000)   /* uncached alias of RAM (doc/SPEC.md) */
+#define UART_BASE       _U(0x20000000)
+#define MTIMER_BASE     _U(0x20001000)
+#define INTC_BASE       _U(0x20002000)
+#define PMU_BASE        _U(0x20003000)
+#define WTIMER_BASE     _U(0x20004000)
 
 /* UART */
 #define UART_TXDATA     0x00
@@ -27,10 +36,10 @@
 #define INTC_PENDING    0x00
 #define INTC_ENABLE     0x04
 #define INTC_ACTIVE     0x08
-#define IRQ_UART        (1u << 0)
-#define IRQ_WTIMER      (1u << 1)
-#define IRQ_PMU         (1u << 2)
-#define IRQ_EXT_WAKE    (1u << 3)
+#define IRQ_UART        (_U(1) << 0)
+#define IRQ_WTIMER      (_U(1) << 1)
+#define IRQ_PMU         (_U(1) << 2)
+#define IRQ_EXT_WAKE    (_U(1) << 3)
 
 /* PMU */
 #define PMU_CTRL        0x00
@@ -46,21 +55,32 @@
 #define PMU_MODE_IDLE   0u
 #define PMU_MODE_SLEEP  1u
 #define PMU_MODE_DEEP   2u
-#define PMU_CTRL_LP_EN  (1u << 8)
+#define PMU_CTRL_LP_EN  (_U(1) << 8)
 
-#define PMU_ST_STATE(s)   ((s) & 0x1Fu)
-#define PMU_ST_CUR_OP(s)  (((s) >> 8) & 0x3u)
-#define PMU_ST_DVFS_PEND  (1u << 10)
-#define PMU_ST_RESUME     (1u << 16)
-#define PMU_ST_RESUME_DEEP (1u << 17)
-#define PMU_ST_DVFS_DONE  (1u << 18)
-#define PMU_ST_ERR_DIRTY  (1u << 19)
+#define PMU_ST_STATE(s)   ((s) & _U(0x1F))
+#define PMU_ST_CUR_OP(s)  (((s) >> 8) & _U(0x3))
+#define PMU_ST_DVFS_PEND  (_U(1) << 10)
+#define PMU_ST_RESUME     (_U(1) << 16)
+#define PMU_ST_RESUME_DEEP (_U(1) << 17)
+#define PMU_ST_DVFS_DONE  (_U(1) << 18)
+#define PMU_ST_ERR_DIRTY  (_U(1) << 19)
 
-#define WAKE_MEIP       (1u << 0)
-#define WAKE_MTIP       (1u << 1)
-#define WAKE_MSIP       (1u << 2)
+#define WAKE_MEIP       (_U(1) << 0)
+#define WAKE_MTIP       (_U(1) << 1)
+#define WAKE_MSIP       (_U(1) << 2)
 
-#define PM_RESUME_MAGIC 0x5E5E0A0Au
+#define PM_RESUME_MAGIC _U(0x5E5E0A0A)
+
+/* CPU CSRs (in-house core, doc/CPU.md) */
+#define CSR_MCACHECTL   0x7C0
+#define MCACHECTL_DFLUSH  (_U(1) << 0)   /* D-cache clean + invalidate */
+#define MCACHECTL_IINVAL  (_U(1) << 1)   /* I-cache invalidate */
+#define MCACHECTL_DCLEAN  (_U(1) << 2)   /* D-cache clean */
+#define MCACHECTL_WBERR   (_U(1) << 31)  /* write-back error (read) */
+#define MIE_MSIE        (_U(1) << 3)
+#define MIE_MTIE        (_U(1) << 7)
+#define MIE_MEIE        (_U(1) << 11)
+#define MSTATUS_MIE     (_U(1) << 3)
 
 /* wake timer */
 #define WT_CTRL         0x00
@@ -71,6 +91,8 @@
 #ifndef __ASSEMBLER__
 #include <stdint.h>
 #define REG32(base, off) (*(volatile uint32_t *)((base) + (off)))
+/* Uncached view of a RAM object (bypasses the D-cache). */
+#define RAM_ALIAS(p)    ((uintptr_t)(p) - RAM_BASE + RAM_ALIAS_BASE)
 #endif
 
 #endif

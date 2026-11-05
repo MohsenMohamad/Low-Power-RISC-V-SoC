@@ -7,13 +7,19 @@
  * Covers: RUN<->IDLE (wake timer, machine timer, software interrupt),
  * all six DVFS operating-point changes (with a CPU-vs-AON clock ratio check),
  * RUN<->SLEEP, RUN<->DEEP_SLEEP with RAM retention checks, wake from the
- * external wake pin, and a sleep/wake stress loop mixing all of them.
+ * external wake pin, a refused power-down with a dirty D-cache, and a
+ * sleep/wake stress loop mixing all of them.
+ *
+ * In-house core: WFI ends only on an interrupt pending and enabled in mie, so
+ * main() enables MEIE/MTIE/MSIE (with mstatus.MIE = 0: no trap is taken).
+ * pm_suspend() cleans the D-cache before WFI.
  */
 #include <stdint.h>
 #include "soc.h"
 
 extern int pm_suspend(uint32_t mode);
 extern volatile uint32_t pm_boot_status;
+extern volatile uint32_t pm_test_skip_clean;
 
 #define UART(o)   REG32(UART_BASE, o)
 #define MTIMER(o) REG32(MTIMER_BASE, o)
@@ -67,6 +73,25 @@ static inline uint32_t rdcycle(void) {
   return c;
 }
 
+/* Clean the D-cache now, so the clean inside pm_suspend() finds (almost)
+ * nothing dirty and the low-power entry is quick compared with the wake-up
+ * delays below. Each dirty line costs four single-beat AXI writes across the
+ * CPU->AON bridge. Returns the write-back error bit. */
+static uint32_t dcache_clean(void) {
+  uint32_t v;
+  __asm__ volatile("csrwi 0x7C0, 4\n\tcsrr %0, 0x7C0" : "=r"(v)::"memory");
+  return v & MCACHECTL_WBERR;
+}
+
+/* Wake-up delays in clk_aon cycles. They must exceed the low-power entry time
+ * at the slowest operating point (OP0) including the D-cache scan in
+ * pm_suspend(). After a SLEEP resume both caches are cold and every line
+ * refill crosses the CPU->AON bridge as four single-beat reads; at OP0 the
+ * stress loop measured ~5100 clk_aon cycles from wt_arm() to WFI. */
+#define WAKE_IDLE   4000u
+#define WAKE_OFF    12000u
+#define WAKE_STRESS 12000u
+
 static void wt_arm(uint32_t ticks) {
   WT(WT_CTRL) = 0;
   WT(WT_STATUS) = 1;
@@ -110,7 +135,8 @@ static void step(const char *name) {
 static void test_idle_wake_timer(void) {
   step("idle/wake-timer");
   INTC(INTC_ENABLE) = IRQ_WTIMER;
-  wt_arm(1000);
+  check(dcache_clean() == 0, "clean", 0);
+  wt_arm(WAKE_IDLE);
   int r = pm_suspend(PMU_MODE_IDLE);
   check(r == 0, "idle returned", (uint32_t)r);
   check(PMU(PMU_WAKE_CAUSE) & WAKE_MEIP, "wake cause", PMU(PMU_WAKE_CAUSE));
@@ -121,8 +147,9 @@ static void test_idle_wake_timer(void) {
 
 static void test_idle_mtimer(void) {
   step("idle/mtimer");
+  check(dcache_clean() == 0, "clean", 0);
   uint32_t now = MTIMER(MTIME_LO);
-  mtimecmp_set(now + 1000u, MTIMER(MTIME_HI) + ((now + 1000u) < now));
+  mtimecmp_set(now + WAKE_IDLE, MTIMER(MTIME_HI) + ((now + WAKE_IDLE) < now));
   int r = pm_suspend(PMU_MODE_IDLE);
   check(r == 0, "idle returned", (uint32_t)r);
   check(PMU(PMU_WAKE_CAUSE) & WAKE_MTIP, "wake cause", PMU(PMU_WAKE_CAUSE));
@@ -178,12 +205,13 @@ static void test_power_off(uint32_t mode, const char *name, int use_ext_pin) {
   retained_marker = 0xCAFEBABEu;
 
   uart_flush();
+  check(dcache_clean() == 0, "clean", 0);
   if (use_ext_pin) {
     INTC(INTC_ENABLE) = IRQ_EXT_WAKE;
     wt_stop();
   } else {
     INTC(INTC_ENABLE) = IRQ_WTIMER;
-    wt_arm(1500);
+    wt_arm(WAKE_OFF);
   }
   int r = pm_suspend(mode);
   uint32_t bs = pm_boot_status;
@@ -201,6 +229,31 @@ static void test_power_off(uint32_t mode, const char *name, int use_ext_pin) {
   INTC(INTC_ENABLE) = 0;
 }
 
+/* The PMU must refuse SLEEP while the D-cache holds dirty lines: the CPU
+ * stays powered (clock gated), STATUS.ERR_DIRTY is set, SLEEP_CNT does not
+ * change and the dirty data is intact after the wake-up. */
+static void test_dirty_refusal(void) {
+  step("sleep/dirty-dcache-refused");
+  uint32_t cnt0 = PMU(PMU_SLEEP_CNT);
+  PMU(PMU_STATUS) = PMU_ST_ERR_DIRTY;
+  for (unsigned i = 0; i < 16; i++) retained_buf[i] = 0x51EE0000u + i;
+  INTC(INTC_ENABLE) = IRQ_WTIMER;
+  wt_arm(WAKE_OFF);
+  pm_test_skip_clean = 1;
+  int r = pm_suspend(PMU_MODE_SLEEP);
+  pm_test_skip_clean = 0;
+  uint32_t st = PMU(PMU_STATUS);
+  check(r == 0, "refused sleep returned", (uint32_t)r);
+  check(st & PMU_ST_ERR_DIRTY, "err_dirty", st);
+  check(!(st & PMU_ST_RESUME), "no resume", st);
+  check(PMU(PMU_SLEEP_CNT) == cnt0, "sleep count unchanged", PMU(PMU_SLEEP_CNT));
+  for (unsigned i = 0; i < 16; i++)
+    check(retained_buf[i] == 0x51EE0000u + i, "dirty data", retained_buf[i]);
+  PMU(PMU_STATUS) = PMU_ST_ERR_DIRTY;
+  wt_stop();
+  INTC(INTC_ENABLE) = 0;
+}
+
 static void test_stress(int iterations) {
   step("stress/sleep-wake-loop");
   static const uint8_t op_seq[5] = {0, 2, 1, 1, 2};
@@ -212,7 +265,8 @@ static void test_stress(int iterations) {
     uint32_t cnt0 = PMU(PMU_SLEEP_CNT);
     retained_marker = 0x1000u + (uint32_t)i;
     INTC(INTC_ENABLE) = IRQ_WTIMER;
-    wt_arm(800u + 37u * (uint32_t)i);
+    check(dcache_clean() == 0, "clean", (uint32_t)i);
+    wt_arm(WAKE_STRESS + 37u * (uint32_t)i);
     int r = pm_suspend(mode);
     check(r == (mode != PMU_MODE_IDLE), "stress return", (uint32_t)i);
     check(retained_marker == 0x1000u + (uint32_t)i, "stress marker", retained_marker);
@@ -227,6 +281,8 @@ static void test_stress(int iterations) {
 
 int main(void) {
   uart_puts("\nlp-soc pm_test\n");
+  /* wake sources: interrupt controller, machine timer, software interrupt */
+  __asm__ volatile("csrw mie, %0" ::"r"(MIE_MEIE | MIE_MTIE | MIE_MSIE));
   check(PMU_ST_CUR_OP(PMU(PMU_STATUS)) == 2, "reset op", PMU(PMU_STATUS));
   check(PMU(PMU_SLEEP_CNT) == 0, "reset sleep count", PMU(PMU_SLEEP_CNT));
 
@@ -238,6 +294,7 @@ int main(void) {
   test_power_off(PMU_MODE_DEEP, "deep-sleep/wake-timer", 0);
   test_power_off(PMU_MODE_SLEEP, "sleep/ext-wake-pin", 1);
   test_power_off(PMU_MODE_DEEP, "deep-sleep/ext-wake-pin", 1);
+  test_dirty_refusal();
   test_stress(12);
 
   if (fails == 0) {
