@@ -93,7 +93,7 @@ check() {
 }
 
 # ------------------------------------------------------------------ install
-install() {
+do_install() {
   sudo_ apt-get update
   sudo_ env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential git python3 python3-pip autoconf bison flex help2man libfl-dev ccache curl unzip \
@@ -152,6 +152,6 @@ install() {
 case "${1:-}" in
   --check) check ;;
   --env)   env_lines ;;
-  "")      install ;;
+  "")      do_install ;;
   *)       echo "usage: $0 [--check|--env]"; exit 2 ;;
 esac
