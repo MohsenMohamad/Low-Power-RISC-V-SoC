@@ -172,7 +172,7 @@ module dbg_trace
   // ======================= CPU: capture =======================
   typedef enum logic [1:0] {C_IDLE, C_ARMED, C_ACTIVE, C_STOPPED} cst_t;
   cst_t        cst_q;
-  logic        frozen_q, frz_req_prev_q, clr_seen_q, ovf_q;
+  logic        frozen_q, frz_req_prev_q, clr_seen_q, clr_ack_q, ovf_q;
   logic [3:0]  pwr_seen_q;
   logic [31:0] wcnt_q;
 
@@ -244,11 +244,14 @@ module dbg_trace
 
   always_ff @(posedge clk_cpu_i or negedge rst_c_n) begin
     if (!rst_c_n) begin
-      cst_q <= C_IDLE; frozen_q <= 1'b0; frz_req_prev_q <= 1'b0; clr_seen_q <= 1'b0;
+      cst_q <= C_IDLE; frozen_q <= 1'b0; frz_req_prev_q <= 1'b0; clr_seen_q <= 1'b0; clr_ack_q <= 1'b0;
       ovf_q <= 1'b0; pwr_seen_q <= '0; wcnt_q <= '0;
     end else begin
       pwr_seen_q     <= pwr_cnt_c;
       frz_req_prev_q <= frz_req_c;
+      // acknowledge one cycle after the clear, when the Gray copy of the
+      // write count (registered from wcnt_q) already holds 0
+      clr_ack_q      <= clr_seen_q;
       if (clr_c) begin
         clr_seen_q <= clr_req_c;
         cst_q      <= en_c ? C_ARMED : C_IDLE;
@@ -291,7 +294,7 @@ module dbg_trace
     .clk_dst_i(clk_aon_i), .rst_dst_ni(rst_a_n), .bin_o(wcnt_a));
   dbg_sync #(.WIDTH(6)) u_s_st (
     .clk_i(clk_aon_i), .rst_ni(rst_a_n),
-    .d_i({cst_q == C_ACTIVE, cst_q == C_ARMED, cst_q == C_STOPPED, frozen_q, ovf_q, clr_seen_q}),
+    .d_i({cst_q == C_ACTIVE, cst_q == C_ARMED, cst_q == C_STOPPED, frozen_q, ovf_q, clr_ack_q}),
     .q_o({st_active_a, st_armed_a, st_stopped_a, st_frozen_a, st_ovf_a, clr_ack_a}));
 
   // Displayed write count: held while a clear is in flight and for two

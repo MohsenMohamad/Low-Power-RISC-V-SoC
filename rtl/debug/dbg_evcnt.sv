@@ -78,7 +78,7 @@ module dbg_evcnt
   assign reg_werr = !(reg_waddr == A_CTRL || reg_waddr == A_STATUS);
 
   // ---------------- clk_cpu counters ----------------
-  logic frozen_c, clr_req_c, clr_seen_q;
+  logic frozen_c, clr_req_c, clr_seen_q, clr_ack_q;
   dbg_sync #(.WIDTH(2)) u_s_ctl (.clk_i(clk_cpu_i), .rst_ni(rst_c_n),
                                  .d_i({frozen, clr_req_q}), .q_o({frozen_c, clr_req_c}));
   wire clr_c = (clr_req_c != clr_seen_q);
@@ -89,16 +89,21 @@ module dbg_evcnt
 
   always_ff @(posedge clk_cpu_i or negedge rst_c_n) begin
     if (!rst_c_n) begin
-      clr_seen_q <= 1'b0; ovf_c <= '0;
+      clr_seen_q <= 1'b0; clr_ack_q <= 1'b0; ovf_c <= '0;
       for (int i = 0; i < NC; i++) cnt_c[i] <= '0;
-    end else if (clr_c) begin
-      clr_seen_q <= clr_req_c;
-      for (int i = 0; i < NC; i++) cnt_c[i] <= '0;
-    end else if (!frozen_c) begin
-      for (int i = 0; i < NC; i++) begin
-        if (ev[i]) begin
-          cnt_c[i] <= cnt_c[i] + 32'd1;
-          if (cnt_c[i] == 32'hFFFF_FFFF) ovf_c[i] <= ~ovf_c[i];
+    end else begin
+      // acknowledge one cycle after the clear, when the Gray copies
+      // (registered from cnt_c) already hold 0
+      clr_ack_q <= clr_seen_q;
+      if (clr_c) begin
+        clr_seen_q <= clr_req_c;
+        for (int i = 0; i < NC; i++) cnt_c[i] <= '0;
+      end else if (!frozen_c) begin
+        for (int i = 0; i < NC; i++) begin
+          if (ev[i]) begin
+            cnt_c[i] <= cnt_c[i] + 32'd1;
+            if (cnt_c[i] == 32'hFFFF_FFFF) ovf_c[i] <= ~ovf_c[i];
+          end
         end
       end
     end
@@ -113,7 +118,7 @@ module dbg_evcnt
   logic [NC-1:0] ovf_a, ovf_prev_q;
   logic          clr_ack_a;
   dbg_sync #(.WIDTH(NC + 1)) u_s_back (.clk_i(clk_aon_i), .rst_ni(rst_a_n),
-                                       .d_i({ovf_c, clr_seen_q}), .q_o({ovf_a, clr_ack_a}));
+                                       .d_i({ovf_c, clr_ack_q}), .q_o({ovf_a, clr_ack_a}));
 
   wire clr_pend = (clr_req_q != clr_ack_a);
   logic [1:0]  hold_q;
