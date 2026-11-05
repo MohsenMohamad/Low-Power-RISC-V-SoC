@@ -174,7 +174,10 @@ module core_top
     if (f_err) begin
       id_exc = '{valid: 1'b1, cause: EXC_INSTR_ACCESS, tval: f_pc};
     end else if (id_ctrl_dec.illegal || (id_ctrl_dec.is_csr && id_csr_illegal)) begin
-      id_exc = '{valid: 1'b1, cause: EXC_ILLEGAL, tval: f_instr};
+      // mtval = the faulting instruction bits; a 16-bit encoding (bits[1:0] != 11)
+      // only occupies the low parcel, zero-extended.
+      id_exc = '{valid: 1'b1, cause: EXC_ILLEGAL,
+                 tval: (f_instr[1:0] == 2'b11) ? f_instr : {16'b0, f_instr[15:0]}};
     end else if (id_ctrl_dec.is_ecall) begin
       id_exc = '{valid: 1'b1, cause: EXC_ECALL_M, tval: 32'd0};
     end else if (id_ctrl_dec.is_ebreak) begin

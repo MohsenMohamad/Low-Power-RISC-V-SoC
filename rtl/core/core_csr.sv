@@ -4,7 +4,7 @@
 // Implemented: mstatus/mstatush, misa (read-only), mie, mip (read-only),
 // mtvec (direct/vectored), mscratch, mepc, mcause, mtval, mcountinhibit,
 // mcycle/minstret(+h), cycle/instret/time(+h) shadows, mhpmcounter3-31(+h)
-// and mhpmevent3-31 (read zero), pmpcfg0-15/pmpaddr0-63 (no PMP: read zero),
+// and mhpmevent3-31 (read zero), no PMP CSRs,
 // mvendorid/marchid/mimpid/mhartid/mconfigptr, and the custom mcachectl.
 module core_csr
   import riscv_pkg::*;
@@ -84,8 +84,8 @@ module core_csr
     if ((a[11:5] == 7'b1011_000 || a[11:5] == 7'b1011_100) && a[4:0] >= 5'd3) e = 1'b1;
     // mhpmevent3..31 (323-33F)
     if (a[11:5] == 7'b0011_001 && a[4:0] >= 5'd3) e = 1'b1;
-    // pmpcfg0..15 (3A0-3AF), pmpaddr0..63 (3B0-3EF)
-    if (a[11:4] == 8'h3A || (a >= 12'h3B0 && a <= 12'h3EF)) e = 1'b1;
+    // No PMP is implemented, so pmpcfg*/pmpaddr* do not exist (illegal), as in
+    // the Spike reference configured with 0 PMP regions.
     return e;
   endfunction
 
