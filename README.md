@@ -17,7 +17,8 @@ rtl/tech     tech_sram_sp.sv            SRAM wrapper (generic model)
 dv/cosim     Verilator C++ testbench, Spike lockstep co-simulation,
              random instruction generator, ISA + micro-architectural coverage
 dv/archtest  riscv-arch-test model header
-dv/cache     SystemVerilog class-based constrained-random cache testbenches
+dv/cache     SystemVerilog class-based constrained-random unit testbenches
+             (I-cache, D-cache, AXI4-Lite mux)
 dv/common    AXI4-Lite memory model, ELF loader (C++)
 sw/tests     directed test programs; sw/common/link.ld
 scripts      regression runners, coverage report, mutation analysis, tool setup
@@ -55,7 +56,7 @@ make test          # lint + cosim + archtest + cachetest + coverage
 | `make lint` | `verilator --lint-only -Wall` on all RTL |
 | `make cosim` | directed tests plus `COSIM_SEEDS` (default 200) random programs, each in lockstep with Spike |
 | `make archtest` | riscv-arch-test rv32i_m I/M/Zifencei/privilege, signatures compared against Spike |
-| `make cachetest` | SV cache testbenches (`dv/cache`, `SEEDS`, `N`) |
+| `make cachetest` | SV unit testbenches: I-cache, D-cache, AXI mux (`dv/cache`, `SEEDS`, `N`) |
 | `make coverage` | merged functional + code coverage, written to `build/coverage/report.md` |
 | `python3 scripts/mutation.py` | injects RTL bugs and checks that the flows detect them |
 
