@@ -410,8 +410,7 @@ CI: see "CI" below.
 
 Not run: UVM and UPF-aware checks (as in stage 1). In `make test` the
 45-test suite runs on Verilator only; pm_test and boot_test also run on Icarus
-(4-state). A one-off Icarus run of the whole suite was still running when
-this was written (over 35 minutes; the result is added with the CI result).
+(4-state). The full suite on Icarus was not completed (open item 5).
 
 ### CI
 
@@ -439,9 +438,11 @@ of the run on the stage-2 pull request is recorded in the next section update
 4. The D-cache write-back error path of the firmware (`PM_EWB`, ROM refusing
    to start an image) cannot be provoked on the SoC (RAM never errors while
    the CPU runs); it is covered by the D-cache unit bench only.
-5. The validation suite runs on Verilator only in `make test` (44 s for
-   197 ms of simulated time); an Icarus 4-state run of the whole suite takes
-   well over 35 minutes and is not part of `make test`.
+5. Full suite on Icarus not completed (stopped after 35 min without a result; not
+   required for this stage). In
+   `make test` the suite runs on Verilator only (44 s for 197 ms of simulated
+   time). Command (after `make fw build/sim/iv/tb_soc.vvp`):
+   `vvp -n build/sim/iv/tb_soc.vvp +rom=build/fw/lpsoc/rom.hex +ram=build/fw/lpsoc/suite.hex +bootarg=8000ffff +timeout=2000000000 +cov=build/fw-suite-icarus/cov_suite.txt`
 6. Boot time: the ROM checks the CRC of the whole image before starting it,
    through single-beat AXI refills; for the 62 KB suite image this takes more
    than 8 ms of simulated time (the bad-CRC negative test did not reach the
