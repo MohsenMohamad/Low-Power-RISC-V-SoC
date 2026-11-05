@@ -93,7 +93,9 @@ def main():
             elif t == "covergroup":
                 h = d.get("h", "?")
                 cgbins[(os.path.basename(f), h)] += c
-            elif "/rtl/" in f and t in ("line", "toggle", "expr", "branch", "block"):
+            elif ("/rtl/" in f or f.startswith("rtl/")) and t in ("line", "toggle", "expr", "branch", "block"):
+                if f.startswith("rtl/"):
+                    f = "/" + f
                 o = d.get("o", "")
                 if t == "toggle" and os.path.basename(f) == "tech_sram_sp.sv" and o.startswith("mem"):
                     continue   # memory array contents: data-dependent, excluded
