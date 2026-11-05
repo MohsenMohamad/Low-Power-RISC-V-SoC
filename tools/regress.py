@@ -8,6 +8,7 @@ per test, and prints a summary table.
   tools/regress.py --only debug-sv       suites whose name matches
   tools/regress.py --list                show discovered suites / tests
   tools/regress.py --stress-flags 1      stress with fault injection
+  tools/regress.py --unit-seeds 5        seeds 1..5 of every testbench test
 
 Outputs (default build/regress/): summary.txt, results.json (input of
 tools/triage.py), junit.xml, logs/, artifacts/, coverage/ (tools/cov_merge.py).
@@ -109,7 +110,9 @@ def expand(suite, args, out):
         for t in list_tests(d):
             if t in suite.get("exclude", []):
                 continue
-            for s in suite.get("seeds", [1]):
+            seeds = list(range(1, args.unit_seeds + 1)) if args.unit_seeds and "seeds" in suite \
+                else suite.get("seeds", [1])
+            for s in seeds:
                 tests.append(Test(name, t, ["make", "--no-print-directory", "-C", d, "run-test", "TEST=" + t,
                                             "SEED=%d" % s, "OUT=" + art], ROOT, timeout, s, artifacts=art))
     elif kind == "make-test":
@@ -197,6 +200,7 @@ def main(argv=None):
     p.add_argument("--seeds", type=int, default=4, help="number of random stress seeds")
     p.add_argument("--seed-list", type=lambda s: [int(x, 0) for x in s.split(",")], help="explicit stress seeds")
     p.add_argument("--seed-base", type=int, default=None, help="seed of the seed generator (default: time)")
+    p.add_argument("--unit-seeds", type=int, help="run seeds 1..N of every seeded make-list test")
     p.add_argument("--stress-iters", type=int, default=24)
     p.add_argument("--stress-flags", type=int, default=0, help="1 = fault injection")
     p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 2)

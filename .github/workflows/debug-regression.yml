@@ -75,7 +75,7 @@ jobs:
 
       - name: Regression (all suites + random stress seeds)
         run: |
-          python3 tools/regress.py -j "$(nproc)" --seeds "${{ github.event.inputs.seeds || 8 }}" \
+          python3 tools/regress.py -j "$(nproc)" --unit-seeds 3 --seeds "${{ github.event.inputs.seeds || 8 }}" \
             --seed-base "${{ github.run_number }}" --out build/regress
 
       - name: Triage

@@ -95,7 +95,8 @@ class Monitor:
         if lines and lines[0].strip() == line.strip():
             lines = lines[1:]
         lines = [ln for ln in lines if ln.strip()]
-        errs = [ln for ln in lines if ln.startswith("ERR")]
+        # monitor errors are "ERR <reason>" (not e.g. the "ERRLOG" dump line)
+        errs = [ln for ln in lines if re.match(r"ERR\b", ln)]
         if errs:
             raise MonitorError("%s: %s" % (line, errs[0]))
         return lines
