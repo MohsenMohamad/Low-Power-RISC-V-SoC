@@ -1,6 +1,11 @@
 /*
- * Validation: power states (IDLE, SLEEP, DEEP_SLEEP), resume path through the
- * boot ROM, sleep abort, software reset, DVFS, and sleep/wake stress.
+ * Validation: power states (IDLE, SLEEP, DEEP_SLEEP), the resume path through
+ * the boot ROM (doc/BOOT_ABI.md), refused and aborted entries, DVFS, and
+ * sleep/wake stress, on the SoC PMU (doc/SOC_REGMAP.md).
+ *
+ * Every power test passes only if the requested transition completed
+ * (doc/SPEC.md): pm_* results other than PM_WOKE (IDLE) / PM_RESUMED
+ * (SLEEP, DEEP_SLEEP) fail the test unless the test provokes the abort.
  */
 #include "test.h"
 #include "arch.h"
@@ -9,33 +14,40 @@
 #include "handoff.h"
 #include "platform_api.h"
 #include "pm.h"
-#ifdef ARCH_RV32M
 #include "csr.h"
-#endif
 
 #ifndef STRESS_ITERS
 #define STRESS_ITERS 24
 #endif
-/* Wake-up time for SLEEP tests in mtime ticks. It must cover the suspend
- * entry (context save, D$ flush, I$ misses over the CDC bridge), otherwise
- * the power-down is (correctly) aborted. ~250 us at 32 MHz. */
-#define SLEEP_TICKS  8000u
+
+/* Wake-up time for SLEEP / DEEP_SLEEP in mtime (clk_aon) ticks per operating
+ * point. It must cover the suspend entry (context save and CRC, D$ clean,
+ * I$ refills over the CDC bridge), which scales with the CPU clock; a timer
+ * that expires before the WFI makes the entry abort, which the tests report
+ * as a failure (it is not the transition they request). */
+static const uint32_t sleep_ticks[PMU_NUM_OPP] = {12000u, 8000u, 6000u};
+#define IDLE_TICKS 1500u
 
 volatile uint32_t *suite_scratch(void);
 uint32_t ctx_regs_check(pm_ctx_t *ctx);
 
-/* Pre-clean the D$ before arming the wake timer: the flush inside
- * pm_suspend() then only writes back the few lines dirtied since, instead of
- * eating into the sleep time (a wake timer that expires before the WFI makes
- * the PMU refuse the power-down, which pm_suspend reports as PM_ABORTED). */
+/* Pre-clean the D$ before arming the wake timer, so the clean inside
+ * pm_suspend() only writes back the few lines dirtied since. Wake source:
+ * the machine timer (MTIE). */
 static int sleep_for(enum pm_state st, uint32_t ticks)
 {
-    if (st != PM_IDLE) dcache_clean_all();
-    pmu_set_wake(PMU_WAKE_MTIP);
+    if (st != PM_IDLE && dcache_clean()) return PM_EWB;
+    uint32_t mie = arch_irq_mask_save(1u << IRQ_MTI);
     timer_set_cmp(timer_now() + ticks);
     int r = pm_suspend(st, 0);
     timer_cancel();
+    arch_irq_mask_restore(mie);
     return r;
+}
+
+static int want(enum pm_state st)
+{
+    return st == PM_IDLE ? PM_WOKE : PM_RESUMED;
 }
 
 /* ------------------------------------------------ context save/restore */
@@ -53,8 +65,13 @@ static int t_ctx_roundtrip(void)
     CHECK(!pm_ctx_valid(&c));               /* CRC catches corruption  */
     c.regs[5] ^= 0x100;
     CHECK(pm_ctx_valid(&c));
+    c.arch[7] ^= 1;
+    CHECK(!pm_ctx_valid(&c));               /* the CRC covers arch[] too */
+    c.arch[7] ^= 1;
     c.magic = 0;
     CHECK(!pm_ctx_valid(&c));               /* invalidated context     */
+    /* CRC-32/IEEE check value (doc/BOOT_ABI.md) */
+    CHECK_EQ(crc32("123456789", 9), 0xCBF43926u);
     return TEST_PASS;
 }
 TEST(40, "pm_ctx_save_restore", 0, t_ctx_roundtrip);
@@ -63,21 +80,18 @@ TEST(40, "pm_ctx_save_restore", 0, t_ctx_roundtrip);
 static int t_idle(void)
 {
     uint32_t op = pmu_cur_op();
-    uint64_t ratio_x100 = (uint64_t)(REF_HZ >> op) * 100u / AON_HZ;   /* cpu cycles per tick */
-    uint32_t idle0 = pmu_read(PMU_CNT_IDLE);
+    static const uint32_t per[PMU_NUM_OPP] = {OP0_PERIOD_PS, OP1_PERIOD_PS, OP2_PERIOD_PS};
     uint64_t m0 = timer_now();
     uint64_t c0 = arch_cycles();
-    timer_set_cmp(m0 + 3000);
-    int r = pm_idle();
+    int r = sleep_for(PM_IDLE, 3000);
     uint64_t c1 = arch_cycles();
     uint64_t m1 = timer_now();
-    timer_cancel();
-    uint64_t running = (m1 - m0) * ratio_x100 / 100u;
+    uint64_t running = (m1 - m0) * AON_PERIOD_PS / per[op];
     printf_("    %u ticks idle: %u cpu cycles (%u if not gated)\n",
             (unsigned)(m1 - m0), (unsigned)(c1 - c0), (unsigned)running);
     CHECK_EQ(r, PM_WOKE);
     CHECK(m1 >= m0 + 3000);
-    CHECK_EQ(pmu_read(PMU_CNT_IDLE), idle0 + 1);
+    CHECK(pmu_wake_cause() & WAKE_MTIP);
     CHECK(c1 - c0 < running / 4);           /* clock was gated */
     return TEST_PASS;
 }
@@ -96,39 +110,36 @@ static int sleep_test(enum pm_state st)
     for (unsigned i = 0; i < 256; i++) pat[i] = rand_next(&seed);
     uint32_t crc = crc32(pat, sizeof(pat));
     volatile handoff_t *h = HANDOFF;
-    uint32_t cnt0 = pmu_read(deep ? PMU_CNT_DEEP : PMU_CNT_SLEEP);
+    uint32_t cnt0 = pmu_sleep_count();
     uint32_t res0 = h->resumes;
     uint32_t cold0 = h->cold_boots;
-#ifdef ARCH_RV32M
     csr_write(mscratch, 0xC0DE1234u);
-#endif
-    arch_irq_enable(IRQ_MSI);               /* masked source-enable must survive */
+    arch_irq_enable(IRQ_MSI);               /* an extra mie enable must survive */
     uint64_t cyc0 = arch_cycles();
 
-    int r = sleep_for(st, SLEEP_TICKS);
+    int r = sleep_for(st, sleep_ticks[pmu_cur_op()]);
 
     uint64_t cyc1 = arch_cycles();
     int msi_en = arch_irq_is_enabled(IRQ_MSI);
     arch_irq_disable(IRQ_MSI);
-    printf_("    result %d, off for %u ticks, cycle counter %u -> %u\n", r,
-            (unsigned)pmu_read(PMU_OFF_TIME), (unsigned)cyc0, (unsigned)cyc1);
+    printf_("    result %d, wake cause 0x%x, cycle counter %u -> %u\n", r,
+            (unsigned)pmu_wake_cause(), (unsigned)cyc0, (unsigned)cyc1);
     CHECK_EQ(r, PM_RESUMED);
-    CHECK_EQ(pmu_rst_cause(), deep ? PMU_RC_DEEP : PMU_RC_SLEEP);
-    CHECK_EQ(h->rst_cause, deep ? PMU_RC_DEEP : PMU_RC_SLEEP);
+    CHECK_EQ(h->rst_cause, deep ? RST_DEEP : RST_SLEEP);
     CHECK_EQ(h->boot_status, BOOT_RESUMED);
+    CHECK_EQ(h->boot_reason, REASON_OK);
     CHECK_EQ(h->resumes, res0 + 1);
     CHECK_EQ(h->cold_boots, cold0);
-    CHECK_EQ(pmu_read(deep ? PMU_CNT_DEEP : PMU_CNT_SLEEP), cnt0 + 1);
-    CHECK(pmu_read(PMU_OFF_TIME) > 0);
-    CHECK(pmu_read(PMU_WAKE_SRC) & PMU_WAKE_MTIP);
+    CHECK_EQ(pmu_sleep_count(), cnt0 + 1);
+    CHECK(pmu_wake_cause() & WAKE_MTIP);
+    CHECK(!(pmu_status() & (PMU_ST_RESUME | PMU_ST_RESUME_DEEP)));   /* consumed by the ROM */
+    CHECK_EQ(pmu_read(PMU_SCRATCH1), 0);
+    CHECK_EQ(pmu_read(PMU_CTRL), PMU_CTRL_LP_EN | PMU_MODE_IDLE);    /* mode back to IDLE */
     CHECK(cyc1 < cyc0);                     /* PD_CPU was reset: counter restarted */
     CHECK_EQ(crc32(pat, sizeof(pat)), crc); /* RAM retained */
-    CHECK_EQ(cache_ctrl(), CACHE_CTRL_IC_EN | CACHE_CTRL_DC_EN);
     CHECK(msi_en);
-    CHECK(!pm_ctx_valid((const pm_ctx_t *)&h->ctx));   /* consumed */
-#ifdef ARCH_RV32M
+    CHECK(!pm_ctx_valid((const pm_ctx_t *)CTX_ADDR));   /* consumed */
     CHECK_EQ(csr_read(mscratch), 0xC0DE1234u);
-#endif
     /* trap vector restored */
     ex_count = 0;
     trap_set_exc_handler(exc_skip);
@@ -143,115 +154,162 @@ static int t_deep_sleep(void) { return sleep_test(PM_DEEP_SLEEP); }
 TEST(42, "pm_sleep_resume", CAP_PMU | CAP_BOOTROM | CAP_CLINT, t_sleep);
 TEST(43, "pm_deep_sleep_resume", CAP_PMU | CAP_BOOTROM | CAP_CLINT, t_deep_sleep);
 
+/* Entries that must not complete, each reported as such (never as success). */
 static int t_abort(void)
 {
-    uint32_t sl0 = pmu_read(PMU_CNT_SLEEP), ab0 = pmu_read(PMU_CNT_ABORT);
-    uint32_t rc0 = pmu_rst_cause();
+    uint32_t sl0 = pmu_sleep_count();
 
-    /* 1. wake event already pending: WFI falls through, no power-down */
-    pmu_set_wake(PMU_WAKE_MTIP);
+    /* 1. wake event already pending and enabled: WFI falls through, the core
+     *    never reports core_sleep, no power-down */
+    uint32_t mie = arch_irq_mask_save(1u << IRQ_MTI);
     timer_set_cmp(timer_now());
     timer_delay(10);
     int r = pm_suspend(PM_SLEEP, 0);
     timer_cancel();
+    arch_irq_mask_restore(mie);
     CHECK_EQ(r, PM_ABORTED);
-    CHECK_EQ(pmu_read(PMU_CNT_SLEEP), sl0);
-    CHECK_EQ(pmu_read(PMU_CTRL) & 3u, PMU_MODE_IDLE);
+    CHECK_EQ(pmu_sleep_count(), sl0);
+    CHECK_EQ(pmu_read(PMU_CTRL), PMU_CTRL_LP_EN | PMU_MODE_IDLE);
+    CHECK_EQ(pmu_read(PMU_SCRATCH1), 0);
+    CHECK(!pm_ctx_valid((const pm_ctx_t *)CTX_ADDR));
 
-    /* 2. driver refuses a sleep without wake source */
-    pmu_set_wake(0);
-    CHECK_EQ(pm_suspend(PM_DEEP_SLEEP, 0), PM_EINVAL);
-
-    /* 3. PMU refuses it too (raw request): gate, abort, ungate */
-    pmu_write(PMU_EVENT, PMU_EV_SLEEP_ABORT);
-    timer_set_cmp(timer_now() + 600);
-    pmu_set_mode(PMU_MODE_SLEEP, 0);
-    arch_wfi();                              /* ends when the timer fires */
-    timer_cancel();
-    CHECK_EQ(pmu_read(PMU_CNT_ABORT), ab0 + 1);
-    CHECK(pmu_read(PMU_EVENT) & PMU_EV_SLEEP_ABORT);
-    CHECK_EQ(pmu_read(PMU_CTRL) & 3u, PMU_MODE_IDLE);
-    CHECK_EQ(pmu_read(PMU_CNT_SLEEP), sl0);
-    CHECK_EQ(pmu_rst_cause(), rc0);
-    pmu_write(PMU_EVENT, PMU_EV_SLEEP_ABORT);
+    /* 2. no wake source enabled in mie: the driver refuses (WFI would never
+     *    end) */
+    mie = arch_irq_mask_save(0);
+    r = pm_suspend(PM_DEEP_SLEEP, 0);
+    arch_irq_mask_restore(mie);
+    CHECK_EQ(r, PM_EINVAL);
+    CHECK_EQ(pmu_sleep_count(), sl0);
     return TEST_PASS;
 }
 TEST(44, "pm_sleep_abort", CAP_PMU | CAP_CLINT, t_abort);
 
-/* ------------------------------------------------ reboot tests */
-#define SWRST_MARK  0x5357A11Eu
-#define NOFL_MARK   0x40F1A5E0u
+/* ------------------------------------------------ resume rejected: cold boot */
+#define BADCRC_MARK 0xBADC0C0Au
 
-static int t_swreset(void)
+static int t_badcrc(void)
 {
     volatile uint32_t *s = suite_scratch();
-    s[0] = SWRST_MARK;
-    s[1] = HANDOFF->cold_boots;
-    pmu_sw_reset();
-}
-
-static int t_swreset_after(void)
-{
-    volatile uint32_t *s = suite_scratch();
-    CHECK_EQ(s[0], SWRST_MARK);
-    s[0] = 0;
-    CHECK_EQ(pmu_rst_cause(), PMU_RC_SWRST);
-    CHECK_EQ(HANDOFF->rst_cause, PMU_RC_SWRST);
-    CHECK_EQ(HANDOFF->boot_status, BOOT_COLD);
-    CHECK_EQ(HANDOFF->cold_boots, s[1] + 1);
-    return TEST_PASS;
-}
-TEST_DEFINE(45, "pm_sw_reset_cold_boot", CAP_PMU | CAP_BOOTROM, t_swreset, t_swreset_after);
-
-static int t_noflush(void)
-{
-    volatile uint32_t *s = suite_scratch();
-    s[0] = NOFL_MARK;
+    s[0] = BADCRC_MARK;
     s[1] = HANDOFF->bad_resumes;
     s[2] = HANDOFF->cold_boots;
-    dcache_flush_all();                      /* RAM copy of the context is invalid */
-    pmu_set_wake(PMU_WAKE_MTIP);
-    timer_set_cmp(timer_now() + SLEEP_TICKS);
-    int r = pm_suspend(PM_SLEEP, PM_F_NO_FLUSH);
+    s[3] = pmu_sleep_count();
+    if (dcache_clean()) return __LINE__;
+    uart_flush();
+    uint32_t mie = arch_irq_mask_save(1u << IRQ_MTI);
+    timer_set_cmp(timer_now() + sleep_ticks[pmu_cur_op()]);
+    int r = pm_suspend(PM_SLEEP, PM_F_BAD_CRC);
     timer_cancel();
+    arch_irq_mask_restore(mie);
     printf_("    unexpected return from pm_suspend: %d\n", r);
     return __LINE__;
 }
 
-static int t_noflush_after(void)
+static int t_badcrc_after(void)
 {
     volatile uint32_t *s = suite_scratch();
+    volatile handoff_t *h = HANDOFF;
     timer_cancel();
-    CHECK_EQ(s[0], NOFL_MARK);
+    CHECK_EQ(s[0], BADCRC_MARK);
     s[0] = 0;
-    /* the context never reached RAM: the ROM must refuse it and cold boot */
-    CHECK_EQ(pmu_rst_cause(), PMU_RC_SLEEP);
-    CHECK_EQ(HANDOFF->boot_status, BOOT_RESUME_BADCTX);
-    CHECK_EQ(HANDOFF->bad_resumes, s[1] + 1);
-    CHECK_EQ(HANDOFF->cold_boots, s[2] + 1);
+    /* the CPU was powered off; the ROM rejected the context for its CRC and
+     * cold-booted the image (the persistent area was kept) */
+    CHECK_EQ(h->rst_cause, RST_SLEEP);
+    CHECK_EQ(h->boot_status, BOOT_RESUME_BADCTX);
+    CHECK_EQ(h->boot_reason, REASON_CRC);
+    CHECK_EQ(h->bad_resumes, s[1] + 1);
+    CHECK_EQ(h->cold_boots, s[2] + 1);
+    CHECK_EQ(pmu_sleep_count(), s[3] + 1);
+    CHECK_EQ(pmu_read(PMU_SCRATCH1), 0);
+    CHECK(!(pmu_status() & PMU_ST_RESUME));
     return TEST_PASS;
 }
-TEST_DEFINE(46, "pm_sleep_without_flush", CAP_PMU | CAP_BOOTROM | CAP_CACHE, t_noflush, t_noflush_after);
+TEST_DEFINE(45, "pm_resume_bad_crc_cold_boot", CAP_PMU | CAP_BOOTROM | CAP_CLINT, t_badcrc, t_badcrc_after);
+
+/* ------------------------------------------------ dirty D-cache: refused */
+static uint32_t dirty[64] __attribute__((aligned(16)));
+
+/* The PMU powers PD_CPU down only while cache_clean and idle_ack are both
+ * asserted (doc/SPEC.md). Without the clean it refuses: ERR_DIRTY, no
+ * power-off, the CPU stays clock gated until the wake event, dirty data intact.
+ * (The firmware branch's version of this test expected a power cycle and a
+ * ROM CRC rejection; doc/SPEC.md forbids that power-down, audit W17.) */
+static int t_dirty(void)
+{
+    volatile uint32_t *c = dirty;
+    volatile uint32_t *u = UNCACHED(dirty);
+    uint32_t sl0 = pmu_sleep_count();
+    CHECK_EQ(dcache_flush(), 0);
+    for (unsigned i = 0; i < 64; i++) u[i] = 0;
+    for (unsigned i = 0; i < 64; i++) c[i] = 0xD1270000u + i;
+    pmu_clear_status(PMU_ST_ERR_DIRTY);
+    uint32_t mie = arch_irq_mask_save(1u << IRQ_MTI);
+    timer_set_cmp(timer_now() + sleep_ticks[pmu_cur_op()]);
+    int r = pm_suspend(PM_SLEEP, PM_F_NO_CLEAN);
+    timer_cancel();
+    arch_irq_mask_restore(mie);
+    CHECK_EQ(r, PM_ABORTED);
+    CHECK(pmu_status() & PMU_ST_ERR_DIRTY);
+    CHECK_EQ(pmu_sleep_count(), sl0);
+    CHECK(pmu_wake_cause() & WAKE_MTIP);    /* woke from the gated state */
+    for (unsigned i = 0; i < 64; i++) CHECK_EQ(c[i], 0xD1270000u + i);
+    CHECK_EQ(u[0], 0);                      /* never written back */
+    pmu_clear_status(PMU_ST_ERR_DIRTY);
+    CHECK_EQ(dcache_clean(), 0);
+    return TEST_PASS;
+}
+TEST(46, "pm_sleep_dirty_refused", CAP_PMU | CAP_CACHE | CAP_CLINT, t_dirty);
+
+/* SLEEP and DEEP_SLEEP woken by the AON wake timer through the interrupt
+ * controller (MEIP). */
+static int t_sleep_wtimer(void)
+{
+    for (int deep = 0; deep < 2; deep++) {
+        uint32_t cnt0 = pmu_sleep_count();
+        CHECK_EQ(dcache_clean(), 0);
+        uint32_t mie = arch_irq_mask_save(1u << IRQ_MEI);
+        intc_set_enabled(IRQ_WTIMER);
+        wtimer_start(sleep_ticks[pmu_cur_op()], 0);
+        int r = pm_suspend(deep ? PM_DEEP_SLEEP : PM_SLEEP, 0);
+        uint32_t wc = pmu_wake_cause();
+        wtimer_stop();
+        intc_set_enabled(0);
+        arch_irq_mask_restore(mie);
+        CHECK_EQ(r, PM_RESUMED);
+        CHECK_EQ(HANDOFF->rst_cause, deep ? RST_DEEP : RST_SLEEP);
+        CHECK_EQ(pmu_sleep_count(), cnt0 + 1);
+        CHECK(wc & WAKE_MEIP);
+    }
+    return TEST_PASS;
+}
+TEST(47, "pm_sleep_wake_timer", CAP_PMU | CAP_BOOTROM | CAP_WTIMER | CAP_INTC, t_sleep_wtimer);
 
 /* ------------------------------------------------ DVFS */
 static int t_dvfs_switch(void)
 {
-    static const uint8_t seq[] = {1, 2, 0, 2, 1, 0};
-    uint32_t d0 = pmu_read(PMU_CNT_DVFS);
+    /* from OP2 (reset): 2->1 1->2 2->0 0->2 2->1 1->0 0->1: all six pairs */
+    static const uint8_t seq[] = {1, 2, 0, 2, 1, 0, 1};
+    CHECK_EQ(pmu_cur_op(), PMU_RESET_OP);
     for (unsigned i = 0; i < ARRAY_SIZE(seq); i++) {
         CHECK_EQ(pm_set_opp(seq[i]), 0);
-        uint32_t st = pmu_read(PMU_STATUS);
+        uint32_t st = pmu_status();
         CHECK_EQ(PMU_ST_CUR_OP(st), seq[i]);
-        CHECK_EQ(PMU_ST_VSEL(st), 2u - seq[i]);
+        CHECK(!(st & PMU_ST_DVFS_PEND));
+        CHECK_EQ(pmu_read(PMU_VSEL), seq[i]);
+        CHECK_EQ(pmu_read(PMU_DVFS), seq[i]);
     }
-    CHECK_EQ(pmu_read(PMU_CNT_DVFS), d0 + ARRAY_SIZE(seq));
+    /* the current operating point: nothing to do, completes at once */
+    CHECK_EQ(pm_set_opp(1), 0);
     CHECK_EQ(pm_set_opp(3), PM_EINVAL);
+    CHECK_EQ(pm_set_opp(PMU_RESET_OP), 0);
     return TEST_PASS;
 }
 TEST(50, "dvfs_switch_sequence", CAP_DVFS, t_dvfs_switch);
 
 static int t_dvfs_freq(void)
 {
+    static const uint32_t per[PMU_NUM_OPP] = {OP0_PERIOD_PS, OP1_PERIOD_PS, OP2_PERIOD_PS};
+    uint32_t meas_prev = 0;
     for (uint32_t op = 0; op < PMU_NUM_OPP; op++) {
         CHECK_EQ(pm_set_opp(op), 0);
         /* warm up the I$ so neither end of the window includes a refill */
@@ -260,28 +318,32 @@ static int t_dvfs_freq(void)
         while ((m1 = timer_now()) < m0 + 3000) ;
         uint64_t c1 = arch_cycles();
         uint32_t meas = (uint32_t)((c1 - c0) * 1000u / (m1 - m0));
-        uint32_t exp  = (uint32_t)((uint64_t)(REF_HZ >> op) * 1000u / AON_HZ);
+        uint32_t exp  = (uint32_t)((uint64_t)AON_PERIOD_PS * 1000u / per[op]);
         printf_("    OP%u: %u.%03u cpu cycles per mtime tick (expected %u.%03u)\n", (unsigned)op,
                 (unsigned)(meas / 1000), (unsigned)(meas % 1000), (unsigned)(exp / 1000), (unsigned)(exp % 1000));
         CHECK(meas > exp - exp / 50 && meas < exp + exp / 50);   /* +-2 % */
+        CHECK(meas > meas_prev);                                 /* OP0 slowest */
+        meas_prev = meas;
     }
-    CHECK_EQ(pm_set_opp(0), 0);
+    CHECK_EQ(pm_set_opp(PMU_RESET_OP), 0);
     return TEST_PASS;
 }
 TEST(51, "dvfs_frequency_measured", CAP_DVFS | CAP_COUNTERS, t_dvfs_freq);
 
 static int t_dvfs_idle_only(void)
 {
-    uint32_t op0 = pmu_cur_op(), d0 = pmu_read(PMU_CNT_DVFS);
-    pmu_write(PMU_DVFS_OP, op0 == 2 ? 0 : 2);
-    pmu_set_mode(PMU_MODE_IDLE, 1);          /* request, but no WFI */
+    uint32_t op0 = pmu_cur_op();
+    uint32_t to = op0 == 0 ? 2 : 0;
+    pmu_write(PMU_DVFS, to);                 /* request, but no WFI */
     timer_delay(500);
-    CHECK_EQ(pmu_cur_op(), op0);
-    CHECK_EQ(pmu_read(PMU_CNT_DVFS), d0);
-    pmu_set_mode(PMU_MODE_IDLE, 0);          /* withdraw */
-    CHECK_EQ(pm_set_opp(1), 0);              /* proper path works */
-    CHECK_EQ(pmu_read(PMU_CNT_DVFS), d0 + 1);
-    CHECK_EQ(pm_set_opp(0), 0);
+    uint32_t st = pmu_status();
+    CHECK_EQ(PMU_ST_CUR_OP(st), op0);
+    CHECK(st & PMU_ST_DVFS_PEND);
+    CHECK(!(st & PMU_ST_DVFS_DONE));
+    CHECK_EQ(pmu_read(PMU_VSEL), op0);
+    CHECK_EQ(pm_set_opp(to), 0);             /* applied in IDLE */
+    CHECK(!(pmu_status() & PMU_ST_DVFS_PEND));
+    CHECK_EQ(pm_set_opp(PMU_RESET_OP), 0);
     return TEST_PASS;
 }
 TEST(52, "dvfs_only_while_idle", CAP_DVFS, t_dvfs_idle_only);
@@ -294,41 +356,36 @@ static int t_stress(void)
     static const char *names[] = {"IDLE", "SLEEP", "DEEP"};
     uint32_t seed = 0x5EED1234u;
     uint32_t n[3] = {0, 0, 0}, n_dvfs = 0;
-    uint32_t c_idle = pmu_read(PMU_CNT_IDLE), c_sleep = pmu_read(PMU_CNT_SLEEP);
-    uint32_t c_deep = pmu_read(PMU_CNT_DEEP), c_dvfs = pmu_read(PMU_CNT_DVFS);
+    uint32_t c_sleep = pmu_sleep_count();
     uint32_t res0 = HANDOFF->resumes;
 
     for (unsigned i = 0; i < 256; i++) sdata[i] = i * 0x01000193u;
     for (unsigned it = 0; it < STRESS_ITERS; it++) {
         uint32_t r = rand_next(&seed);
         enum pm_state st = (enum pm_state)(r % 3);
-        /* suspend entry time scales with the CPU clock */
-        uint32_t ticks = (st == PM_IDLE ? 400u : SLEEP_TICKS << pmu_cur_op()) + (r >> 4) % 4000u;
         if ((it & 3) == 3) {
             uint32_t op = (r >> 12) % PMU_NUM_OPP;
             CHECK_EQ(pm_set_opp(op), 0);
             n_dvfs++;
         }
+        /* suspend entry time scales with the CPU clock */
+        uint32_t ticks = (st == PM_IDLE ? IDLE_TICKS : sleep_ticks[pmu_cur_op()]) + (r >> 4) % 2000u;
         for (unsigned k = 0; k < 16; k++) sdata[rand_next(&seed) & 255] ^= rand_next(&seed);
         uint32_t crc = crc32(sdata, sizeof(sdata));
         int res = sleep_for(st, ticks);
-        if (res != (st == PM_IDLE ? PM_WOKE : PM_RESUMED) || crc32(sdata, sizeof(sdata)) != crc) {
+        if (res != want(st) || crc32(sdata, sizeof(sdata)) != crc) {
             printf_("    iteration %u: %s for %u ticks at OP%u -> result %d\n", it, names[st],
                     (unsigned)ticks, (unsigned)pmu_cur_op(), res);
             CHECK(0);
         }
         if (st != PM_IDLE)
-            CHECK_EQ(pmu_rst_cause(), st == PM_SLEEP ? PMU_RC_SLEEP : PMU_RC_DEEP);
+            CHECK_EQ(HANDOFF->rst_cause, st == PM_SLEEP ? RST_SLEEP : RST_DEEP);
         n[st]++;
     }
-    CHECK_EQ(pm_set_opp(0), 0);
-    n_dvfs++;
+    CHECK_EQ(pm_set_opp(PMU_RESET_OP), 0);
     printf_("    %u iterations: idle %u, sleep %u, deep %u, dvfs %u\n", STRESS_ITERS,
             (unsigned)n[0], (unsigned)n[1], (unsigned)n[2], (unsigned)n_dvfs);
-    CHECK_EQ(pmu_read(PMU_CNT_IDLE) - c_idle, n[0]);
-    CHECK_EQ(pmu_read(PMU_CNT_SLEEP) - c_sleep, n[1]);
-    CHECK_EQ(pmu_read(PMU_CNT_DEEP) - c_deep, n[2]);
-    CHECK_EQ(pmu_read(PMU_CNT_DVFS) - c_dvfs, n_dvfs);
+    CHECK_EQ(pmu_sleep_count() - c_sleep, n[1] + n[2]);
     CHECK_EQ(HANDOFF->resumes - res0, n[1] + n[2]);
     return TEST_PASS;
 }
@@ -341,33 +398,28 @@ static int t_coverage(void)
     static const char *names[] = {"IDLE ", "SLEEP", "DEEP "};
     uint8_t cov[3][PMU_NUM_OPP] = {{0}};
     uint8_t dv[PMU_NUM_OPP][PMU_NUM_OPP] = {{0}};
-    uint32_t c_dvfs = pmu_read(PMU_CNT_DVFS);
-    unsigned n_dvfs = 0;
 
     for (uint32_t from = 0; from < PMU_NUM_OPP; from++)
         for (uint32_t to = 0; to < PMU_NUM_OPP; to++) {
             if (from == to) continue;
-            if (pmu_cur_op() != from) { CHECK_EQ(pm_set_opp(from), 0); n_dvfs++; }
+            if (pmu_cur_op() != from) CHECK_EQ(pm_set_opp(from), 0);
             CHECK_EQ(pm_set_opp(to), 0);
-            n_dvfs++;
             CHECK_EQ(pmu_cur_op(), to);
             dv[from][to] = 1;
         }
     for (uint32_t op = 0; op < PMU_NUM_OPP; op++) {
-        if (pmu_cur_op() != op) { CHECK_EQ(pm_set_opp(op), 0); n_dvfs++; }
+        if (pmu_cur_op() != op) CHECK_EQ(pm_set_opp(op), 0);
         for (int st = PM_IDLE; st <= PM_DEEP_SLEEP; st++) {
-            uint32_t ticks = st == PM_IDLE ? 600u : (SLEEP_TICKS << op);
+            uint32_t ticks = st == PM_IDLE ? IDLE_TICKS : sleep_ticks[op];
             int r = sleep_for((enum pm_state)st, ticks);
-            CHECK_EQ(r, st == PM_IDLE ? PM_WOKE : PM_RESUMED);
+            CHECK_EQ(r, want((enum pm_state)st));
             CHECK_EQ(pmu_cur_op(), op);           /* OPP survives power-down */
             if (st != PM_IDLE)
-                CHECK_EQ(pmu_rst_cause(), st == PM_SLEEP ? PMU_RC_SLEEP : PMU_RC_DEEP);
+                CHECK_EQ(HANDOFF->rst_cause, st == PM_SLEEP ? RST_SLEEP : RST_DEEP);
             cov[st][op] = 1;
         }
     }
-    CHECK_EQ(pm_set_opp(0), 0);
-    n_dvfs++;
-    CHECK_EQ(pmu_read(PMU_CNT_DVFS) - c_dvfs, n_dvfs);
+    CHECK_EQ(pm_set_opp(PMU_RESET_OP), 0);
 
     puts_("    state x OPP   OP0 OP1 OP2      DVFS from\\to  OP0 OP1 OP2\n");
     for (int st = 0; st < 3; st++) {

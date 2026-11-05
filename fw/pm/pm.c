@@ -1,23 +1,24 @@
 /*
- * Power management.
+ * Power management (doc/SOC_REGMAP.md "Low-power entry", doc/BOOT_ABI.md).
  *
- * SLEEP / DEEP_SLEEP power-down path (firmware side of the PMU sequence):
- *   1. disable interrupts
- *   2. save CPU context into the handoff block (pm_ctx_save) and seal it
- *      with a CRC
- *   3. flush the D-cache (context, stack and all dirty data reach RAM)
- *   4. program PMU CTRL.MODE and execute WFI; the PMU then gates the clock,
- *      isolates, resets and switches PD_CPU off
- * Wake-up: the PMU powers PD_CPU up and releases reset, the boot ROM sees
- * RST_CAUSE = SLEEP/DEEP, validates the context and calls pm_ctx_restore(),
- * which returns a second time from pm_ctx_save() with value 1.
+ * SLEEP / DEEP_SLEEP:
+ *   1. disable interrupts (mstatus.MIE); wake sources stay enabled in mie
+ *   2. save the CPU context at CTX_ADDR (pm_ctx_save), seal it (magic, CRC-32)
+ *   3. PMU.SCRATCH0 = CTX_ADDR, PMU.SCRATCH1 = RESUME_MAGIC
+ *   4. clean the D-cache (mcachectl bit 2), check bit 31, write PMU.CTRL, WFI
+ *      (pm_clean_and_wfi: no cached store after the clean)
+ * The PMU then gates the clock, isolates, resets and switches PD_CPU off; on
+ * the wake event it powers PD_CPU up and the boot ROM restores the context,
+ * so pm_ctx_save() returns a second time with 1.
+ * If WFI returns, the CPU was not powered down: the PMU refused (no
+ * cache_clean / idle_ack, STATUS.ERR_DIRTY) or a wake event came first.
  */
 #include "pm.h"
 #include "arch.h"
 #include "drivers.h"
 #include "lib.h"
 
-#define DVFS_MAX_WAITS 64
+#define DVFS_MAX_WAITS 16
 
 uint32_t pm_ctx_crc(const pm_ctx_t *ctx)
 {
@@ -35,37 +36,50 @@ void pm_ctx_seal(pm_ctx_t *ctx)
     ctx->magic = CTX_MAGIC;
 }
 
+void pm_wfi(void)
+{
+    arch_wfi();
+}
+
 int pm_idle(void)
 {
-    pmu_set_mode(PMU_MODE_IDLE, 0);
-    arch_wfi();
+#if PLATFORM_HAS_SOC
+    pmu_set_mode(PMU_MODE_IDLE);
+#endif
+    pm_wfi();
     return PM_WOKE;
 }
 
+#if PLATFORM_HAS_SOC
 int pm_suspend(enum pm_state st, uint32_t flags)
 {
     if (st == PM_IDLE) return pm_idle();
     if (st != PM_SLEEP && st != PM_DEEP_SLEEP) return PM_EINVAL;
-    if ((pmu_read(PMU_WAKE_EN) & 7u) == 0) return PM_EINVAL;   /* would never wake */
+    if (!arch_irq_wake_sources()) return PM_EINVAL;     /* WFI would never end */
 
-    pm_ctx_t *ctx = (pm_ctx_t *)&HANDOFF->ctx;
+    pm_ctx_t *ctx = (pm_ctx_t *)CTX_ADDR;
     uint32_t irq = arch_irq_save();
+    int r;
 
     if (pm_ctx_save(ctx) == 0) {
         pm_ctx_seal(ctx);
-        pm_flush_and_wfi(st == PM_SLEEP ? PMU_MODE_SLEEP : PMU_MODE_DEEP,
-                         (flags & PM_F_NO_FLUSH) ? 0u : 1u);
-        /* Still powered: the PMU refused the power-down because a wake
-         * event was already pending. */
+        if (flags & PM_F_BAD_CRC) ctx->crc ^= 1u;
+        pmu_write(PMU_SCRATCH0, CTX_ADDR);
+        pmu_write(PMU_SCRATCH1, RESUME_MAGIC);
+        r = pm_clean_and_wfi((st == PM_SLEEP ? PMU_MODE_SLEEP : PMU_MODE_DEEP) | PMU_CTRL_LP_EN,
+                             (flags & PM_F_NO_CLEAN) ? 0u : 1u);
+        /* Still powered: no power-down happened. */
+        pmu_write(PMU_SCRATCH1, 0);
         ctx->magic = 0;
-        pmu_set_mode(PMU_MODE_IDLE, 0);
+        pmu_set_mode(PMU_MODE_IDLE);
         arch_irq_restore(irq);
-        return PM_ABORTED;
+        return r < 0 ? PM_EWB : PM_ABORTED;
     }
 
-    /* Resumed through the boot ROM. Invalidate the context so that it can
-     * never be restored twice. */
+    /* Resumed through the boot ROM (which consumed SCRATCH1). The PMU mode is
+     * sticky: return to IDLE so a later plain WFI does not power down. */
     ctx->magic = 0;
+    pmu_set_mode(PMU_MODE_IDLE);
     arch_irq_restore(irq);
     return PM_RESUMED;
 }
@@ -73,34 +87,44 @@ int pm_suspend(enum pm_state st, uint32_t flags)
 int pm_set_opp(uint32_t op)
 {
     if (op >= PMU_NUM_OPP) return PM_EINVAL;
+    if (pmu_cur_op() == op) return 0;       /* the PMU runs no sequence for it */
 
-    uint32_t irq      = arch_irq_save();
-    uint32_t intc_en  = intc_enabled();
-    uint32_t ev_ie    = pmu_read(PMU_EVENT_IE);
-    int      mei_en   = arch_irq_is_enabled(IRQ_MEI);
-    int      rc       = -2;
+    uint32_t irq     = arch_irq_save();
+    uint32_t mie     = arch_irq_mask_save(1u << IRQ_MEI);   /* only DVFS_DONE wakes */
+    uint32_t intc_en = intc_enabled();
+    uint32_t irq_en  = pmu_read(PMU_IRQ_EN);
+    int      rc      = PM_ETIMEOUT;
 
-    /* the DVFS_DONE event (PMU -> intc -> MEIP) ends the WFI */
-    pmu_write(PMU_EVENT, PMU_EV_DVFS_DONE);
-    pmu_write(PMU_EVENT_IE, ev_ie | PMU_EV_DVFS_DONE);
-    intc_enable(INTC_SRC_PMU);
-    arch_irq_enable(IRQ_MEI);
-
-    pmu_write(PMU_DVFS_OP, op);
-    pmu_set_mode(PMU_MODE_IDLE, 1);
+    pmu_clear_status(PMU_ST_DVFS_DONE);
+    pmu_write(PMU_IRQ_EN, PMU_IRQ_EN_DVFS_DONE);
+    intc_set_enabled(IRQ_PMU);
+    pmu_write(PMU_DVFS, op);
+    pmu_set_mode(PMU_MODE_IDLE);
     for (int i = 0; i < DVFS_MAX_WAITS; i++) {
-        arch_wfi();
-        if (pmu_read(PMU_EVENT) & PMU_EV_DVFS_DONE) {
-            rc = (pmu_cur_op() == op) ? 0 : -1;
+        pm_wfi();
+        uint32_t s = pmu_status();
+        if (s & PMU_ST_DVFS_DONE) {
+            rc = (PMU_ST_CUR_OP(s) == op) ? 0 : PM_ABORTED;
             break;
         }
     }
-    if (rc == -2) pmu_set_mode(PMU_MODE_IDLE, 0);   /* withdraw the request */
-
-    pmu_write(PMU_EVENT, PMU_EV_DVFS_DONE);
-    pmu_write(PMU_EVENT_IE, ev_ie);
+    pmu_clear_status(PMU_ST_DVFS_DONE);
+    pmu_write(PMU_IRQ_EN, irq_en);
     intc_set_enabled(intc_en);
-    if (!mei_en) arch_irq_disable(IRQ_MEI);
+    arch_irq_mask_restore(mie);
     arch_irq_restore(irq);
     return rc;
 }
+#else
+int pm_suspend(enum pm_state st, uint32_t flags)
+{
+    (void)flags;
+    return st == PM_IDLE ? pm_idle() : PM_EINVAL;
+}
+
+int pm_set_opp(uint32_t op)
+{
+    (void)op;
+    return PM_EINVAL;
+}
+#endif
