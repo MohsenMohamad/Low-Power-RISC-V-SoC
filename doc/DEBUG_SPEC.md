@@ -1,12 +1,12 @@
 # Debug and Validation Infrastructure — Specification
 
-Scope: observability hardware (`rtl/debug/`), its verification (`verif/debug/`),
-debug firmware (`fw/debug/`), host automation (`tools/`), CI
-(`.github/workflows/`). This document is the contract that the other areas
-(CPU, SoC top/PMU, boot ROM/drivers/monitor, UVM) connect to at merge.
-
-Items marked **[MERGE]** are assumptions that must be aligned with the owning
-area when branches are merged.
+Normative for the debug blocks (doc/SPEC.md "Register maps"). Scope:
+observability hardware (`rtl/debug/`), its verification (`verif/debug/`),
+debug firmware (`fw/debug/`), host tools (`tools/dbg_decode.py`,
+`tools/triage.py`, `tools/cov_merge.py`, `tools/bench/`). doc/SOC_REGMAP.md
+holds the SoC memory map and interrupt numbers; doc/CPU_SOC_INTERFACE.md the
+CPU-side observability ports. Where this document and doc/SPEC.md disagree,
+doc/SPEC.md wins.
 
 ---
 
@@ -54,35 +54,24 @@ All four blocks:
 
 ## 2. Memory map
 
-`SPEC.md` does not assign addresses. The SoC map in use (Session 3,
-`doc/firmware.md`: ROM `0x0000_0000`, RAM `0x2000_0000` / uncached alias
-`0x3000_0000`, UART `0x4000_0000`, intc `0x4000_1000`, PMU `0x4000_2000`,
-timer `0x4001_0000`, external port `0x4F00_0000`, cache control
-`0x5000_0000`) leaves `0x4002_0000` free in the AON peripheral region:
+doc/SPEC.md assigns the debug range `0x2000_8000`, 32 KB, not cacheable.
+`aon_subsys` decodes `0x2000_8000`-`0x2000_BFFF` (16 KB) onto `dbg_subsys`,
+which selects the block with `addr[13:12]`; the blocks decode `addr[11:0]`.
 
 | Base          | Size  | Block        |
 |---------------|-------|--------------|
-| `0x4002_0000` | 4 KB  | `dbg_trace`  |
-| `0x4002_1000` | 4 KB  | `dbg_evcnt`  |
-| `0x4002_2000` | 4 KB  | `dbg_errlog` |
-| `0x4002_3000` | 4 KB  | `dbg_wdt`    |
-| `0x4002_4000` – `0x4002_FFFF` | 48 KB | reserved for debug |
+| `0x2000_8000` | 4 KB  | `dbg_trace`  |
+| `0x2000_9000` | 4 KB  | `dbg_evcnt`  |
+| `0x2000_A000` | 4 KB  | `dbg_errlog` |
+| `0x2000_B000` | 4 KB  | `dbg_wdt`    |
+| `0x2000_C000` - `0x2000_FFFF` | 16 KB | reserved: SLVERR (unmapped, doc/SPEC.md) |
 
-**[MERGE]** the base is one constant: `DBG_BASE` in
-`fw/debug/include/dbg_regs.h` (Makefile variable) and `dbg_base` in the
-bench board profile (`tools/bench/board.py`). The blocks decode only
-`addr[11:0]`; `dbg_subsys` decodes `addr[13:12]`.
-
-### 2.1 Integration preview (PicoRV32 bring-up SoC)
-
-The PicoRV32 SoC of Session 3 (`platform/picorv32`, used unmodified) has no
-free interconnect slot, so `verif/debug/integ/tb_dbg_soc.sv` attaches
-`dbg_subsys` to its external port: the debug blocks are at
-`0x4F00_4000`–`0x4F00_7FFF` there, and the debug firmware is built with
-`DBG_BASE=0x4F004000` for that platform (default of `fw/debug/Makefile`
-for `ARCH=picorv32`). The external port has no wait states, which the
-blocks meet (accept in cycle t, answer in t+1, SVA-checked in the
-testbench). See section 14 for the rest of the preview glue.
+The base is one constant in each consumer: `DBG_BASE` in `fw/include/soc.h`
+(firmware), `DBG_BASE` in `tools/bench/soc_map.py` (bench). Both are taken
+from this table and from doc/SOC_REGMAP.md, which lists the debug range in the
+SoC memory map. The blocks sit behind the AXI4-Lite interconnect in PD_AON
+like every other AON slave: accessible from the CPU and, with the CPU off,
+from nothing else (there is no second bus master).
 
 ## 3. Common register conventions
 

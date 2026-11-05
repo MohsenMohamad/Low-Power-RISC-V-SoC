@@ -22,7 +22,11 @@ WO = write-only.
 | `0x2000_2000` | 4 KB   | Interrupt controller                     |
 | `0x2000_3000` | 4 KB   | PMU                                      |
 | `0x2000_4000` | 4 KB   | Wake timer                               |
-| `0x2000_8000` | 32 KB  | Debug blocks (doc/DEBUG_SPEC.md; not implemented yet: SLVERR) |
+| `0x2000_8000` | 4 KB   | Debug: trace buffer (doc/DEBUG_SPEC.md section 5) |
+| `0x2000_9000` | 4 KB   | Debug: event counters (doc/DEBUG_SPEC.md section 6) |
+| `0x2000_A000` | 4 KB   | Debug: error log (doc/DEBUG_SPEC.md section 7) |
+| `0x2000_B000` | 4 KB   | Debug: watchdog (doc/DEBUG_SPEC.md section 8) |
+| `0x2000_C000` | 16 KB  | Debug range, reserved: SLVERR |
 | `0x3000_0000` | 128 KB | Main RAM, uncached alias                 |
 
 The CPU caches the boot ROM (I-side) and the main RAM window
@@ -36,6 +40,11 @@ reading through the alias data that was written through the cached window,
 clean the D-cache (`mcachectl`); after writing through the alias, flush
 (clean + invalidate) the D-cache before reading the same data through the
 cached window. RAM retention rules apply to both windows.
+
+The debug range `0x2000_8000`-`0x2000_FFFF` (32 KB, doc/SPEC.md) holds the
+four debug blocks; their registers are specified in doc/DEBUG_SPEC.md, which
+is normative for them. They follow the access rules above (full-word
+accesses; partial writes, read-only and unmapped offsets: SLVERR).
 
 ROM writes return SLVERR. RAM accesses while the RAM is in retention return
 SLVERR. This cannot happen from the CPU, which is powered off whenever the RAM
