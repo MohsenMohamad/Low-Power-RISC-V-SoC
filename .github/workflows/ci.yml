@@ -1,0 +1,37 @@
+# Full open-source regression. Uses the same toolchain script as local runs
+# (doc/SPEC.md: one setup script; CI uses the same script).
+name: make test
+on:
+  push:
+    branches: [main, integration]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Cache source-built tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/verilator-5.054
+            /opt/spike
+          key: tools-${{ hashFiles('scripts/setup_toolchain.sh') }}
+      - name: Toolchain
+        run: |
+          sudo scripts/setup_toolchain.sh
+          scripts/setup_toolchain.sh --env | sed -n 's/^export PATH=\(.*\):\$PATH$/\1/p' | tr ':' '\n' >> "$GITHUB_PATH"
+      - name: make test
+        run: make test
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regress
+          path: |
+            build/regress
+            build/coverage/report.md
+            build/*/results.json

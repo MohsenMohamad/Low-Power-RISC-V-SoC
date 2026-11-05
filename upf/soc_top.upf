@@ -4,7 +4,8 @@
 ## Domains
 ##   PD_AON  always on: PMU, bus/CDC bridge, isolation cells, clock/reset
 ##           control, DVFS mux, timers, interrupt controller, UART, ROM, RAM
-##   PD_CPU  switchable, DVFS-scaled: u_pd_cpu (CPU core, later the caches)
+##   PD_CPU  switchable, DVFS-scaled: u_pd_cpu (in-house RV32IM core, I-cache,
+##           D-cache, AXI mux, boundary synchronizers, mtime snapshot receiver)
 ##
 ## Supplies
 ##   VDD_AON     0.90 V fixed
