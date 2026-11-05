@@ -417,9 +417,23 @@ Not run: UVM and UPF-aware checks (as in stage 1). In `make test` the
 The workflow (`.github/workflows/ci.yml`) runs on pull requests and on pushes
 to `main` only (previously also on the `integration` branch). It runs
 `sudo scripts/setup_toolchain.sh`, then `scripts/setup_toolchain.sh --check`
-on the job PATH (printing which `z3` it finds), then `make test`. The result
-of the run on the stage-2 pull request is recorded in the next section update
-(this commit precedes the pull request).
+on the job PATH (printing which `z3` it finds), then `make test`.
+
+First fully green run: run 8, `make test` workflow, on the stage-2 pull
+request (commit `2a491f4`),
+https://github.com/MohsenMohamad/Low-Power-RISC-V-SoC/actions/runs/42113999232:
+
+- Toolchain (tool cache miss: Verilator and Spike built from source): 14.5 min.
+  Verilator's configure: `checking for z3... yes`; `--check`:
+  `verilator-solver z3 --in ok`, `z3 5.3.3 (/usr/local/bin/z3) ok`,
+  `TOOLCHAIN: all pinned versions present`.
+- Toolchain check on the job PATH: `z3: /usr/local/bin/z3 -> /opt/z3-5.3.3/bin/z3`,
+  `Z3 version 5.3.3 - 64 bit`.
+- `make test`: 20/20 required steps PASS, `== make test: PASS`, 2357 s
+  (ubuntu-24.04 runner; same steps and results as the local run above).
+
+The run before the fix (run 6, `integration` branch, commit `1e32c35`) failed
+in the Toolchain step with `z3 absent ... need 5.3.3 first on PATH`.
 
 ### Open items for later stages
 
