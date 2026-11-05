@@ -70,6 +70,36 @@ module tb_top;
         $finish;
     endtask
 
+    // ---------------- debug: PMU state trace, clock probe ----------------
+    logic pmu_trace = 1'b0;
+    initial pmu_trace = $test$plusargs("pmu_trace");
+    logic [4:0] pmu_st_q = '0;
+    always_ff @(posedge clk_aon) begin
+        pmu_st_q <= 5'(dut.u_pmu.st);
+        if (pmu_trace && 5'(dut.u_pmu.st) != pmu_st_q)
+            $display("[TB] %0t PMU state %0d -> %0d (wfi=%b irq=%b%b%b mode=%0d)", $time, pmu_st_q,
+                     5'(dut.u_pmu.st), dut.u_pmu.wfi_s, dut.irq_meip, dut.irq_msip, dut.irq_mtip, dut.u_pmu.mode);
+    end
+    always @(posedge dut.clk_cpu) begin
+        if (pmu_trace && dut.u_pmu.mode != 0 && dut.u_pd_cpu.u_core.instr_waitirq)
+            $display("[TB] %0t waitirq: irq_pending=%08x mask=%08x do_waitirq=%b irq=%08x", $time,
+                     dut.u_pd_cpu.u_core.irq_pending, dut.u_pd_cpu.u_core.irq_mask,
+                     dut.u_pd_cpu.u_core.do_waitirq, dut.u_pd_cpu.irq);
+    end
+    longint unsigned cpu_edges = 0;
+    always @(posedge dut.clk_cpu) cpu_edges <= cpu_edges + 1;
+    initial begin
+        if ($test$plusargs("clk_probe")) begin
+            longint unsigned c0, a0;
+            forever begin
+                c0 = cpu_edges; a0 = cycles;
+                #1000000;
+                $display("[TB] clk probe: %0d cpu edges / %0d aon edges, mtime=%0d",
+                         cpu_edges - c0, cycles - a0, dut.u_timer.mtime);
+            end
+        end
+    end
+
     // ---------------- simulation control device ----------------
     always_ff @(posedge clk_aon) begin
         if (ext_req && ext_we) begin

@@ -17,6 +17,8 @@
 #include "drivers.h"
 #include "handoff.h"
 #include "platform_api.h"
+#include "trap.h"
+#include "pm.h"
 
 #define SUITE_MAGIC 0x53554954u   /* "SUIT" */
 #define MAX_TESTS   96
@@ -130,6 +132,38 @@ static uint32_t finish(void)
     return sig;
 }
 
+/* Bring the platform back to a known baseline after every test, so that a
+ * failing test cannot leave state behind that breaks the following ones. */
+static void env_reset(void)
+{
+    uint32_t caps = suite_caps();
+    (void)arch_irq_save();
+    arch_irq_disable(IRQ_MTI);
+    arch_irq_disable(IRQ_MSI);
+    arch_irq_disable(IRQ_MEI);
+    trap_set_exc_handler(0);
+    if (caps & CAP_CLINT) {
+        timer_cancel();
+        timer_set_msip(0);
+    }
+    if (caps & CAP_INTC) {
+        intc_set_enabled(0);
+        intc_soft_clr(0xFFu);
+    }
+    if (caps & CAP_PMU) {
+        pmu_set_mode(PMU_MODE_IDLE, 0);
+        pmu_set_wake(0);
+        pmu_write(PMU_EVENT_IE, 0);
+        pmu_write(PMU_EVENT, 0xFFu);
+    }
+    if ((caps & CAP_DVFS) && pmu_cur_op() != 0) pm_set_opp(0);
+    if ((caps & CAP_CACHE) && cache_ctrl() != (CACHE_CTRL_IC_EN | CACHE_CTRL_DC_EN)) {
+        icache_inv_all();
+        dcache_flush_all();
+        cache_init();
+    }
+}
+
 static uint32_t run_from_state(void)
 {
     volatile suite_state_t *s = ST;
@@ -149,6 +183,7 @@ static uint32_t run_from_state(void)
         if (t->after_reboot) s->reboot_id = t->id;
         int r = t->run();
         s->reboot_id = 0;
+        env_reset();
         record(t, r, t->after_reboot ? "(no reboot happened)" : 0);
     }
     return finish();
@@ -184,6 +219,7 @@ int suite_resume_after_reboot(uint32_t *signature)
         if (t && t->after_reboot) {
             printf_("[CONT %3u] %s (after reboot)\n", t->id, t->name);
             record(t, t->after_reboot(), "(after reboot)");
+            env_reset();
         }
     }
     *signature = run_from_state();

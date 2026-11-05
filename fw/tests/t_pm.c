@@ -16,12 +16,21 @@
 #ifndef STRESS_ITERS
 #define STRESS_ITERS 24
 #endif
+/* Wake-up time for SLEEP tests in mtime ticks. It must cover the suspend
+ * entry (context save, D$ flush, I$ misses over the CDC bridge), otherwise
+ * the power-down is (correctly) aborted. ~250 us at 32 MHz. */
+#define SLEEP_TICKS  8000u
 
 volatile uint32_t *suite_scratch(void);
 uint32_t ctx_regs_check(pm_ctx_t *ctx);
 
+/* Pre-clean the D$ before arming the wake timer: the flush inside
+ * pm_suspend() then only writes back the few lines dirtied since, instead of
+ * eating into the sleep time (a wake timer that expires before the WFI makes
+ * the PMU refuse the power-down, which pm_suspend reports as PM_ABORTED). */
 static int sleep_for(enum pm_state st, uint32_t ticks)
 {
+    if (st != PM_IDLE) dcache_clean_all();
     pmu_set_wake(PMU_WAKE_MTIP);
     timer_set_cmp(timer_now() + ticks);
     int r = pm_suspend(st, 0);
@@ -96,7 +105,7 @@ static int sleep_test(enum pm_state st)
     arch_irq_enable(IRQ_MSI);               /* masked source-enable must survive */
     uint64_t cyc0 = arch_cycles();
 
-    int r = sleep_for(st, 2000);
+    int r = sleep_for(st, SLEEP_TICKS);
 
     uint64_t cyc1 = arch_cycles();
     int msi_en = arch_irq_is_enabled(IRQ_MSI);
@@ -202,7 +211,7 @@ static int t_noflush(void)
     s[2] = HANDOFF->cold_boots;
     dcache_flush_all();                      /* RAM copy of the context is invalid */
     pmu_set_wake(PMU_WAKE_MTIP);
-    timer_set_cmp(timer_now() + 1500);
+    timer_set_cmp(timer_now() + SLEEP_TICKS);
     int r = pm_suspend(PM_SLEEP, PM_F_NO_FLUSH);
     timer_cancel();
     printf_("    unexpected return from pm_suspend: %d\n", r);
@@ -245,6 +254,8 @@ static int t_dvfs_freq(void)
 {
     for (uint32_t op = 0; op < PMU_NUM_OPP; op++) {
         CHECK_EQ(pm_set_opp(op), 0);
+        /* warm up the I$ so neither end of the window includes a refill */
+        (void)timer_now(); (void)arch_cycles();
         uint64_t m0 = timer_now(), c0 = arch_cycles(), m1;
         while ((m1 = timer_now()) < m0 + 3000) ;
         uint64_t c1 = arch_cycles();
@@ -291,7 +302,8 @@ static int t_stress(void)
     for (unsigned it = 0; it < STRESS_ITERS; it++) {
         uint32_t r = rand_next(&seed);
         enum pm_state st = (enum pm_state)(r % 3);
-        uint32_t ticks = 400 + (r >> 4) % 1200;
+        /* suspend entry time scales with the CPU clock */
+        uint32_t ticks = (st == PM_IDLE ? 400u : SLEEP_TICKS << pmu_cur_op()) + (r >> 4) % 4000u;
         if ((it & 3) == 3) {
             uint32_t op = (r >> 12) % PMU_NUM_OPP;
             CHECK_EQ(pm_set_opp(op), 0);

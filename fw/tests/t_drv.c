@@ -40,6 +40,7 @@ static int t_timer(void)
     CHECK(timer_get_cmp() == ~0ull);
 #if PLATFORM_HAS_SOC
     /* prescaler: mtime advances once every PRESCALE+1 clk_aon cycles */
+    (void)timer_now(); (void)arch_cycles();          /* warm up the I$ */
     uint64_t c0 = arch_cycles(), t0 = timer_now();
     while (timer_now() < t0 + 400) ;
     uint64_t r1 = arch_cycles() - c0;
