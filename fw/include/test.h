@@ -2,9 +2,11 @@
  * Self-checking validation test framework.
  *
  * Every test returns TEST_PASS (0) or a non-zero failure code (by convention
- * the source line of the failing check). A test that needs a CPU reset to
- * complete returns TEST_REBOOT after arming the reboot and provides an
- * after_reboot() function that finishes the check on the next boot.
+ * the source line of the failing check). A test that resets the CPU provides
+ * an after_reboot() function: the runner records the test as in progress in
+ * persistent RAM before calling run(), and after the reboot calls
+ * after_reboot() to finish the check. If run() returns instead of rebooting,
+ * its result is recorded as usual.
  */
 #ifndef TEST_H
 #define TEST_H
@@ -50,8 +52,6 @@ uint32_t suite_run(uint32_t id);
 /* After boot: finish a test that rebooted the CPU. Returns 1 if a suite run
  * was in progress (it is continued and completed). */
 int suite_resume_after_reboot(uint32_t *signature);
-/* Arm a test that reboots the CPU (persists runner state). */
-void suite_prepare_reboot(void);
 
 #define SIG_PASS(n)  (0x600D0000u | ((n) & 0xFFFFu))
 #define SIG_FAIL(n)  (0xBAD00000u | ((n) & 0xFFFFu))
