@@ -147,6 +147,27 @@ module tb_dcache;
   axil_slave  slv;
   cache_agent agt;
 
+  // cache_clean contract (doc/CPU_SOC_INTERFACE.md): while cache_clean is high
+  // no write-back of a cacheable line may be in flight, and a clean/flush that
+  // starts with cache_clean high has nothing to write back.
+  int  cl_wr_outst;
+  bit  cl_maint_started_clean, cl_in_maint;
+  function automatic bit tb_cacheable(bit [31:0] a);
+    return (a & 32'hFFFE_0000) == 32'h8000_0000;
+  endfunction
+  always @(posedge clk) if (rst_n) begin
+    if (axi.awvalid && axi.awready && tb_cacheable(axi.awaddr)) cl_wr_outst++;
+    if (axi.bvalid && axi.bready && cl_wr_outst > 0) cl_wr_outst--;
+    if (cif.cache_clean === 1'b1 && (cl_wr_outst > 0 || (axi.awvalid && tb_cacheable(axi.awaddr))))
+      agt.fail($sformatf("cache_clean high while a write-back to %h is in flight", axi.awaddr));
+    if (cif.maint_req && !cl_in_maint) begin
+      cl_in_maint = 1; cl_maint_started_clean = (cif.cache_clean === 1'b1);
+    end
+    if (cl_in_maint && cl_maint_started_clean && axi.awvalid && tb_cacheable(axi.awaddr))
+      agt.fail($sformatf("cache_clean was high but maintenance wrote back %h", axi.awaddr));
+    if (!cif.maint_req) cl_in_maint = 0;
+  end
+
   // Directed single accesses (no outstanding request may be pending).
   task automatic direct_store(input bit [31:0] a, input bit [31:0] d);
     @(negedge clk);

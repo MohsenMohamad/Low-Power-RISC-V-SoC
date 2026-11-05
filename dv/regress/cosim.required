@@ -1,0 +1,5 @@
+# Spike lockstep co-simulation: directed programs (sw/tests) + random seeds 1..200
+# (COSIM_SEEDS=200, COSIM_LEN=3000; scripts/run_cosim.py).
+directed/cachectl
+directed/smoke
+seed{1..200}

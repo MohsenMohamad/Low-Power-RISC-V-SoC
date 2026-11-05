@@ -4,6 +4,7 @@ cover
 
 [options]
 multiclock on
+prove: aigsmt z3
 prove: mode prove
 cover: mode cover
 cover: depth 40

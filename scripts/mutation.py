@@ -6,6 +6,13 @@ the repository. Core/bus mutants are run against the Spike lockstep regression
 (a reduced seed set plus the arch-test smoke subset); cache mutants are also run
 against the SystemVerilog unit testbenches (caches, AXI mux). A mutant is "killed" if any flow
 fails.
+
+The run fails (exit 1, doc/SPEC.md verification rules) if any mutant SURVIVED,
+failed to build (BUILD-FAIL) or could not be applied because the RTL text no
+longer matches (NOT-APPLIED), unless the mutant is listed with a reason in the
+waiver file (--waivers, default dv/mutation_waivers.txt, "<id>  # reason").
+Waivers without a reason and waivers for unknown mutant ids are errors.
+--mutants <json> replaces the built-in list (used by the negative tests).
 """
 import argparse
 import concurrent.futures as cf
@@ -76,6 +83,27 @@ MUTANTS = [
      "P_RESP: if (m_rvalid && s_rready[rd_own_q]) begin rd_q <= P_IDLE; rd_last_q <= rd_own_q; end",
      "P_RESP: if (m_rvalid) begin rd_q <= P_IDLE; rd_last_q <= rd_own_q; end",
      "AXI mux releases read path without RREADY", True),
+    # ---- CPU <-> SoC interface (doc/CPU_SOC_INTERFACE.md) ----
+    ("wfi_no_hold", "rtl/core/core_top.sv",
+     "else if (irq_wake && !wfi_hold_i)        wfi_sleep_q <= 1'b0;",
+     "else if (irq_wake)                       wfi_sleep_q <= 1'b0;",
+     "core leaves WFI while the PMU idle handshake is active", False),
+    ("ack_not_quiescent", "rtl/cpu/cpu_top.sv",
+     "assign quiescent = wfi_quiet && ic_idle && dc_idle && mux_idle;",
+     "assign quiescent = wfi_quiet;",
+     "idle_ack given while a cache / the bus mux is still busy", False),
+    ("dc_clean_on_error", "rtl/cache/dcache.sv",
+     "if (cnt_q == 2'd3 && wb_for_flush_q && !line_err_q && !m_bresp[1]) begin",
+     "if (cnt_q == 2'd3 && wb_for_flush_q) begin",
+     "D$ marks a line clean although its write-back failed (W35)", True),
+    ("dc_evict_err_lost", "rtl/cache/dcache.sv",
+     "            wb_err_q   <= evict_err_q;   // lost eviction data is reported by this op",
+     "            wb_err_q   <= 1'b0;",
+     "D$ eviction write-back error not reported by the next maintenance op (W35)", True),
+    ("dc_clean_during_evict", "rtl/cache/dcache.sv",
+     "                 !(state_q inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&\n",
+     "",
+     "D$ reports clean while an eviction write-back is still in flight", True),
 ]
 
 
@@ -92,8 +120,9 @@ def one(args, m):
     work = os.path.join(args.out, mid)
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
-    for d in ("rtl", "dv", "sw", "scripts"):
-        shutil.copytree(os.path.join(ROOT, d), os.path.join(work, d))
+    for d in ("rtl", "dv", "sw", "scripts", "mk"):
+        if os.path.isdir(os.path.join(ROOT, d)):
+            shutil.copytree(os.path.join(ROOT, d), os.path.join(work, d))
     shutil.copy(os.path.join(ROOT, "Makefile"), work)
     src = open(os.path.join(work, f)).read()
     if old not in src:
@@ -103,6 +132,10 @@ def one(args, m):
     rc, out = sh(f"make cosim-build VERILATOR={args.verilator} JOBS=1", work)
     if rc:
         return {"id": mid, "desc": desc, "status": "BUILD-FAIL", "log": out[-400:]}
+    if cache:
+        rc, out = sh(f"make -C dv/cache build VERILATOR={args.verilator} BUILD={work}/build/cachetest", work)
+        if rc:
+            return {"id": mid, "desc": desc, "status": "BUILD-FAIL", "log": out[-400:]}
     rc, out = sh(f"python3 scripts/run_cosim.py --bin build/cosim/obj/Vcosim --seeds {args.seeds} "
                  f"--length 2000 --jobs 1 --out build/cosim/mut --timeout 300", work)
     if rc:
@@ -123,16 +156,56 @@ def main():
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--verilator", default="verilator")
     ap.add_argument("--only", default="")
+    ap.add_argument("--mutants", default="", help="JSON list replacing the built-in mutants")
+    ap.add_argument("--waivers", default=os.path.join(ROOT, "dv/mutation_waivers.txt"))
     a = ap.parse_args()
-    ms = [m for m in MUTANTS if not a.only or m[0] in a.only.split(",")]
+    os.makedirs(a.out, exist_ok=True)
+    mutants = MUTANTS
+    if a.mutants:
+        mutants = [tuple(m) for m in json.load(open(a.mutants))]
+    known = {m[0] for m in mutants}
+    waivers, errors = {}, []
+    if os.path.exists(a.waivers):
+        for n, line in enumerate(open(a.waivers), 1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            body, _, reason = line.partition("#")
+            mid = body.strip()
+            if not reason.strip():
+                errors.append(f"{a.waivers}:{n}: waiver without a reason: {line.strip()!r}")
+            elif mid not in {m[0] for m in MUTANTS} | known:
+                errors.append(f"{a.waivers}:{n}: waiver for unknown mutant {mid!r}")
+            else:
+                waivers[mid] = reason.strip()
+    ms = [m for m in mutants if not a.only or m[0] in a.only.split(",")]
+    if a.only and len(ms) != len(set(a.only.split(","))):
+        errors.append(f"unknown mutant id in --only: {sorted(set(a.only.split(',')) - known)}")
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         res = list(ex.map(lambda m: one(a, m), ms))
     for r in res:
-        print(f"{r['status']:12s} {r['id']:15s} {r['desc']}  {','.join(r.get('killed_by', []))}")
+        bad = r["status"] != "KILLED"
+        if bad and r["id"] in waivers:
+            r["waived"] = waivers[r["id"]]
+        print(f"{r['status']:12s} {r['id']:22s} {r['desc']}  {','.join(r.get('killed_by', []))}"
+              + (f"  [waived: {r['waived']}]" if "waived" in r else ""))
+        if r["status"] == "BUILD-FAIL":
+            print("    " + r.get("log", "").replace("\n", "\n    ")[-400:])
     k = sum(r["status"] == "KILLED" for r in res)
-    print(f"MUTATION: {k}/{len(res)} mutants killed")
-    json.dump(res, open(os.path.join(a.out, "summary.json"), "w"), indent=1)
+    failed = [r["id"] for r in res if r["status"] != "KILLED" and "waived" not in r]
+    print(f"MUTATION: {k}/{len(res)} mutants killed, "
+          f"{sum('waived' in r for r in res)} waived, {len(failed)} failing: {failed}")
+    for e in errors:
+        print("  " + e)
+    json.dump({"results": res, "failing": failed, "errors": errors},
+              open(os.path.join(a.out, "summary.json"), "w"), indent=1)
+    json.dump([{"id": r["id"], "status": "PASS" if (r["status"] == "KILLED" or "waived" in r) else r["status"]}
+               for r in res], open(os.path.join(a.out, "results.json"), "w"), indent=1)
+    if failed or errors or not res:
+        print("MUTATION: FAIL")
+        return 1
+    print("MUTATION: PASS")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -62,6 +62,8 @@ def main():
               f"{s['error_responses']} error responses, {s['maint_ops']} maintenance ops, "
               f"{s['mem_word_checks']} post-maintenance memory checks, {s['mismatches']} mismatches")
     json.dump({"summary": summary, "results": res}, open(os.path.join(a.build, "summary.json"), "w"), indent=1)
+    json.dump([{"id": f"{r['bench']}/seed{r['seed']}", "status": "PASS" if r["pass"] else "FAIL"} for r in res],
+              open(os.path.join(a.build, "results.json"), "w"), indent=1)
     sys.exit(0 if all(r["pass"] for r in res) else 1)
 
 

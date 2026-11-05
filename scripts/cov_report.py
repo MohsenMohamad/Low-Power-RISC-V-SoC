@@ -10,6 +10,14 @@ Reports:
   * functional: ISA plan bins, SVA cover properties, covergroup bins (holes listed)
   * code: line / toggle / expression points per RTL file (union over all flows)
 Writes <out>/report.md and <out>/summary.json.
+
+Coverage goals (doc/SPEC.md verification rules): every ISA plan bin, every SVA
+cover property and every covergroup bin must be hit. A hole fails the run
+(exit 1) unless it is listed with a reason in the waiver file (--waivers,
+default dv/coverage_waivers.txt; format "<kind> <bin>  # reason", kind is
+isa, cover or cg). A waiver without a reason, or one that matches no hole
+(stale), is an error. Missing coverage inputs (no database for one of the
+required flows) also fail the run. Code coverage is reported, not gated.
 """
 import argparse
 import collections
@@ -17,6 +25,35 @@ import glob
 import json
 import os
 import subprocess
+import sys
+
+REQUIRED_DB_GLOBS = {
+    "cosim": "cosim/regress/**/coverage*.dat",
+    "archtest": "archtest/*/*/coverage.dat",
+    "cachetest-dcache": "cachetest/dcache/seed*/coverage.dat",
+    "cachetest-icache": "cachetest/icache/seed*/coverage.dat",
+}
+
+
+def load_waivers(path):
+    """Return ({(kind, bin): reason}, [errors])."""
+    waivers, errors = {}, []
+    if not path or not os.path.exists(path):
+        return waivers, errors
+    for n, line in enumerate(open(path), 1):
+        line = line.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        body, _, reason = line.partition("#")
+        parts = body.split()
+        if len(parts) != 2 or parts[0] not in ("isa", "cover", "cg"):
+            errors.append(f"{path}:{n}: malformed waiver: {line!r}")
+            continue
+        if not reason.strip():
+            errors.append(f"{path}:{n}: waiver without a reason: {line!r}")
+            continue
+        waivers[(parts[0], parts[1])] = reason.strip()
+    return waivers, errors
 
 RV32I = ("lui auipc jal jalr beq bne blt bge bltu bgeu lb lh lw lbu lhu sb sh sw addi slti sltiu xori "
          "ori andi slli srli srai add sub sll slt sltu xor srl sra or and fence fence.i").split()
@@ -70,16 +107,24 @@ def main():
     ap.add_argument("--build", default="build")
     ap.add_argument("--out", default="build/coverage")
     ap.add_argument("--verilator-coverage", default="verilator_coverage")
+    ap.add_argument("--waivers", default=os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "dv/coverage_waivers.txt"))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    failures = []
+    for flow, g in REQUIRED_DB_GLOBS.items():
+        if not glob.glob(os.path.join(a.build, g), recursive=True):
+            failures.append(f"no coverage database for required flow '{flow}' ({g})")
 
     dats = sorted(glob.glob(os.path.join(a.build, "cosim/regress/**/coverage*.dat"), recursive=True) +
                   glob.glob(os.path.join(a.build, "archtest/*/*/coverage.dat")) +
                   glob.glob(os.path.join(a.build, "cachetest/*/seed*/coverage.dat")))
     # Merged Verilator database (for verilator_coverage --annotate if wanted)
     if dats:
-        subprocess.run([a.verilator_coverage, "--write", os.path.join(a.out, "merged.dat")] + dats,
-                       capture_output=True)
+        p = subprocess.run([a.verilator_coverage, "--write", os.path.join(a.out, "merged.dat")] + dats,
+                           capture_output=True, text=True)
+        if p.returncode:
+            failures.append("verilator_coverage merge failed: " + p.stderr[-300:])
 
     code = collections.defaultdict(int)          # (file,type,line,col,o) -> count
     user = collections.defaultdict(int)          # cover property name -> count
@@ -103,7 +148,11 @@ def main():
 
     # ISA bins
     isa = collections.Counter()
-    for p in glob.glob(os.path.join(a.build, "**/isa.cov"), recursive=True):
+    isa_files = glob.glob(os.path.join(a.build, "cosim/**/isa.cov"), recursive=True) + \
+        glob.glob(os.path.join(a.build, "archtest/**/isa.cov"), recursive=True)
+    if not isa_files:
+        failures.append("no ISA coverage (isa.cov) files")
+    for p in isa_files:
         for line in open(p):
             k, v = line.rsplit(" ", 1)
             isa[k] += int(v)
@@ -183,6 +232,30 @@ def main():
         print("  holes: " + ", ".join(isa_holes + [n for _, n in user_holes] + [n for _, n in cg_holes]))
     print(f"  report: {os.path.join(a.out, 'report.md')}")
 
+    waivers, werr = load_waivers(a.waivers)
+    failures += werr
+    holes = [("isa", h) for h in isa_holes] + [("cover", n) for _, n in user_holes] + \
+            [("cg", n) for _, n in cg_holes]
+    used = set()
+    for h in holes:
+        if h in waivers:
+            used.add(h)
+            print(f"  waived hole {h[0]} {h[1]}: {waivers[h]}")
+        else:
+            failures.append(f"coverage hole {h[0]} {h[1]} (not waived)")
+    for w in sorted(set(waivers) - used):
+        failures.append(f"stale waiver {w[0]} {w[1]}: no such hole")
+    summary["waived"] = [f"{k} {b}" for k, b in sorted(used)]
+    summary["failures"] = failures
+    json.dump(summary, open(os.path.join(a.out, "summary.json"), "w"), indent=1)
+    if failures:
+        print("COVERAGE: FAIL")
+        for f in failures:
+            print("  " + f)
+        return 1
+    print("COVERAGE: PASS (all coverage goals met)")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

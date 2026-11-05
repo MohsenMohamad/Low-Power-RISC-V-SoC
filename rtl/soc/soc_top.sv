@@ -116,7 +116,7 @@ module soc_top #(
   logic        mtime_ack, i_mtime_req;
   cdc_snapshot_src #(.W(64)) u_mtime_src (
     .clk_i (clk_aon_i), .rst_ni (rst_aon_n), .value_i (mtime),
-    .req_tgl_i (i_mtime_req), .ack_tgl_o (mtime_ack), .snap_o (mtime_snap)
+    .req_i (i_mtime_req), .ack_o (mtime_ack), .snap_o (mtime_snap)
   );
 
   pd_cpu #(

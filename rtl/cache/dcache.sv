@@ -490,9 +490,13 @@ module dcache #(
 
       if (state_q == S_FL_DONE) evict_err_q <= 1'b0;   // reported by this op
 
+      // Low from the cycle a cacheable store is accepted (its line becomes
+      // dirty in LOOKUP) and while an eviction write-back is in flight.
       clean_q <= !(|(dirty_q[0] & valid_q[0])) && !(|(dirty_q[1] & valid_q[1])) &&
                  !(state_q inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&
-                 !(state_d inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG});
+                 !(state_d inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&
+                 !(accept && we_i && is_cacheable(addr_i)) &&
+                 !(state_q == S_LOOKUP && rq_we_q);
 
       // After a flush write-back the scan resumes at the next way/set
       if (state_q == S_WB_B && m_bvalid && cnt_q == 2'd3 && wb_for_flush_q) begin

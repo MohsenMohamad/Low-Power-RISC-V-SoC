@@ -41,9 +41,11 @@ RV32IM + Zicsr + Zifencei + Zicntr, machine mode only, in-order, single issue.
 | 0 | D-cache flush (clean + invalidate) | 0 |
 | 1 | I-cache invalidate | 0 |
 | 2 | D-cache clean | 0 |
-| 31 | – | sticky D-cache write-back error since the last maintenance operation |
+| 31 | – | write-back error: set if a write-back of the last maintenance operation failed, or an eviction write-back failed since the previous one (see doc/CPU_SOC_INTERFACE.md) |
 
-The CSR write stalls in WB until the operations complete. Firmware uses `mcachectl` bit 2 (clean, or bit 0 flush) before power-down.
+The CSR write stalls in WB until the operations complete, i.e. until every write response of the write-backs arrived. A line whose write-back failed stays dirty, so `cache_clean_o` stays low. Firmware uses `mcachectl` bit 2 (clean, or bit 0 flush) before power-down and checks bit 31.
+
+**WFI and the PMU idle handshake.** While `idle_req_i` is high (or `idle_ack_o` still high) the core does not leave WFI, even with an enabled interrupt pending. `cpu_top` acknowledges `idle_req_i` once WFI retired and the pipeline, fetch unit, both caches and the AXI mux are idle. Port semantics: doc/CPU_SOC_INTERFACE.md.
 
 ### CSRs
 
@@ -107,7 +109,7 @@ Tags and data live in `tech_sram_sp` instances: single-port, 1-cycle synchronous
 | Miss | refill 4 words, then re-lookup | evict dirty victim (4 single-beat writes), refill 4 words, then re-lookup |
 | Uncached access | single AXI4-Lite read | single AXI4-Lite transaction with byte strobes |
 | Bus error on refill | `err` response; line left invalid | `err` response (load/store access fault); line left invalid |
-| Bus error on write-back | – | imprecise; sets `wb_err_o` (sticky until next maintenance start) |
+| Bus error on write-back | – | imprecise; sets `wb_err_o`; a failed clean/flush write-back keeps the line dirty; a failed eviction is reported by the next maintenance operation |
 | Maintenance | invalidate-all in 1 cycle (`inval_req`/`inval_done`) | clean, or flush (clean + invalidate): scans every set and way, writes back dirty lines |
 
 AXI `AxPROT` is 001 for data and 101 for instruction (privileged, non-secure, data or instruction).
@@ -121,10 +123,15 @@ Arbitrates the two cache masters onto one AXI4-Lite master port. Read and write 
 | Region | Base | Size | Cacheable |
 |---|---|---|---|
 | Boot ROM | 0x0000_0000 | 16 KB | I |
-| RAM (PD_AON, retained) | 0x8000_0000 | 128 KB | I + D |
+| RAM (PD_AON, retained) | 0x1000_0000 | 128 KB | I + D |
+| RAM uncached alias | 0x3000_0000 | 128 KB | no |
 | Peripherals | everything else | | no |
 
-`cpu_top` parameters `ROM_*`/`RAM_*` set the cacheable windows. The co-simulation testbench uses a 4 KB-aligned 4 MB RAM window.
+`cpu_top` parameters `ROM_*`/`RAM_*` set the cacheable windows; their defaults
+are the doc/SPEC.md map, and the SoC sets them explicitly (`pd_cpu`). The
+co-simulation and arch-test testbench (`cpu_top` alone, no SoC) overrides them
+to a 4 MB test RAM window at 0x8000_0000 (`-GRAM_BASE`, `-GRAM_MASK` in the
+Makefile); the cache unit benches set their own windows.
 
 ## Known limitations / deviations
 

@@ -12,7 +12,7 @@ CFLAGS  := $(ARCH) -O2 -g -ffreestanding -fno-builtin -nostdlib -mno-relax \
            -msmall-data-limit=0 -Wall -Wextra -Werror -Iinclude
 LDFLAGS := $(ARCH) -nostdlib -nostartfiles -Wl,-T,link.ld -Wl,--no-relax -Wl,--no-warn-rwx-segments -static -lgcc
 
-PROGS   := pm_test boot_test
+PROGS   := pm_test boot_test neg_fail
 
 all: $(PROGS:%=$(BUILD)/%.hex)
 

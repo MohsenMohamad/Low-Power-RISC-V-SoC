@@ -11,7 +11,7 @@
 //     here, exactly once (u_async_sync). Nothing inside cpu_top synchronizes
 //     them again, and nothing in PD_AON synchronizes them on their way here.
 //   * mtime (64 bit, clk_aon) arrives as a coherent snapshot through a
-//     toggle handshake (cdc_snapshot_dst); the source half is in soc_top.
+//     four-phase handshake (cdc_snapshot_dst); the source half is in soc_top.
 // The port list, widths, clock domains and handshakes are specified in
 // doc/CPU_SOC_INTERFACE.md.
 // -----------------------------------------------------------------------------
@@ -34,8 +34,8 @@ module pd_cpu #(
   output wire         cache_clean_o,
   // mtime snapshot crossing
   input  logic [63:0] mtime_snap_i,   // quasi-static, clk_aon
-  input  logic        mtime_ack_i,    // toggle, clk_aon
-  output wire         mtime_req_o,    // toggle, clk_cpu
+  input  logic        mtime_ack_i,    // 4-phase acknowledge, clk_aon
+  output wire         mtime_req_o,    // 4-phase request, clk_cpu
   // AXI4-Lite master (clk_cpu; crosses to clk_aon in the PD_AON bridge)
   output wire         m_awvalid_o,
   input  logic        m_awready_i,
@@ -69,8 +69,8 @@ module pd_cpu #(
   logic [63:0] mtime;
   logic        mtime_valid;
   cdc_snapshot_dst #(.W(64)) u_mtime_dst (
-    .clk_i, .rst_ni, .snap_i (mtime_snap_i), .ack_tgl_i (mtime_ack_i),
-    .req_tgl_o (mtime_req_o), .value_o (mtime), .valid_o (mtime_valid)
+    .clk_i, .rst_ni, .snap_i (mtime_snap_i), .ack_i (mtime_ack_i),
+    .req_o (mtime_req_o), .value_o (mtime), .valid_o (mtime_valid)
   );
 
   // ---------------- CPU core + caches ----------------

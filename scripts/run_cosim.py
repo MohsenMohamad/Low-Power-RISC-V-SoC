@@ -114,6 +114,10 @@ def main():
                "failing_seeds": [r["seed"] for r in results if not r["pass"]], "results": results}
     with open(os.path.join(args.out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=1)
+    common = [{"id": f"directed/{n.split(' ')[0]}", "status": "PASS" if ok else "FAIL"} for n, ok, _ in dres] + \
+             [{"id": f"seed{r['seed']}", "status": "PASS" if r["pass"] else "FAIL"} for r in results]
+    with open(os.path.join(args.out, "results.json"), "w") as f:
+        json.dump(common, f, indent=1)
     print(f"COSIM: {npass}/{len(results)} seeds passed ({100.0 * summary['pass_rate']:.1f}%), "
           f"{tot['retired']} instructions retired, {tot['traps']} exceptions, {tot['irqs']} interrupts "
           f"compared against Spike")

@@ -1,0 +1,7 @@
+# Coverage goals of the SoC power-management test (fw/pm_test.c on sim/tb_soc.sv).
+arc * >= 1                 # every PMU FSM arc
+illegal transitions == 0
+pstate * >= 1              # every completed architectural power-state transition
+dvfs * >= 1                # every DVFS operating-point pair
+aborted RUN->SLEEP >= 1    # the dirty-D-cache refusal is exercised and reported as ABORTED
+corrupt events >= 6        # OFF-state corruption applied on every power-off

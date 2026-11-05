@@ -100,12 +100,16 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--rv-prefix", default="riscv64-unknown-elf-")
+    ap.add_argument("--only", default="", help="comma-separated test names (suite/name)")
     args = ap.parse_args()
     base = os.path.join(args.suite, "riscv-test-suite", "rv32i_m")
     if not os.path.isdir(base):
         sys.exit(f"riscv-arch-test not found at {args.suite} (git submodule update --init)")
     work = [(s, os.path.join(base, s, "src", f)) for s in SUITES
             for f in sorted(os.listdir(os.path.join(base, s, "src"))) if f.endswith(".S")]
+    if args.only:
+        want = set(args.only.split(","))
+        work = [w for w in work if f"{w[0]}/{os.path.basename(w[1])[:-2]}" in want]
     with cf.ThreadPoolExecutor(args.jobs) as ex:
         results = list(ex.map(lambda w: one(args, *w), work))
     os.makedirs(args.out, exist_ok=True)
@@ -119,6 +123,8 @@ def main():
                "pass_rate": counts.get("PASS", 0) / max(1, ran)}
     with open(os.path.join(args.out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=1)
+    with open(os.path.join(args.out, "results.json"), "w") as f:
+        json.dump([{"id": r["test"], "status": r["status"]} for r in results], f, indent=1)
     for s in SUITES:
         sub = [r for r in results if r["test"].startswith(s + "/")]
         print(f"  {s:10s} " + ", ".join(f"{k}={sum(r['status'] == k for r in sub)}"

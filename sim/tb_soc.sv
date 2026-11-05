@@ -24,6 +24,7 @@
 //   as a completed transition, as coverage, or in the latency statistics.
 // Plusargs: +rom=<hex> +cov=<file> +vcd +timeout=<ns>
 //           +break_iso (negative test: defeat isolation)
+//           +neg_short_rst (negative test: too short PD_CPU reset pulse)
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -230,6 +231,27 @@ module tb_soc #(
     if (dut.i_awvalid) chk(((^(dut.i_awaddr)) !== 1'bx), "unknown isolated awaddr");
     if (dut.i_wvalid)  chk(((^({dut.i_wdata, dut.i_wstrb})) !== 1'bx), "unknown isolated wdata");
     if (dut.i_arvalid) chk(((^(dut.i_araddr)) !== 1'bx), "unknown isolated araddr");
+  end
+
+  // Interface requirement of the mtime crossing (rtl/common/cdc_snapshot_src.sv,
+  // proven in formal/cdc_snapshot.sby under it): a PD_CPU reset lasts at least
+  // 6 clk_aon edges.
+  int rst_aon_edges;
+  // Negative test of this check (+neg_short_rst): a 2-cycle PD_CPU reset pulse.
+  initial if ($test$plusargs("neg_short_rst")) begin
+    wait (checks_on);
+    repeat (2000) @(posedge clk_aon);
+    force dut.cpu_rst_n = 1'b0;
+    repeat (2) @(posedge clk_aon);
+    release dut.cpu_rst_n;
+  end
+  always @(posedge clk_aon) begin
+    if (!dut.cpu_rst_n) rst_aon_edges <= rst_aon_edges + 1;
+    else begin
+      if (checks_on && rst_aon_edges != 0 && rst_aon_edges < 6)
+        chk(1'b0, $sformatf("PD_CPU reset lasted only %0d clk_aon edges (< 6)", rst_aon_edges));
+      rst_aon_edges <= 0;
+    end
   end
 
 `ifdef SVA_ON
