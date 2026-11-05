@@ -269,7 +269,7 @@ module tb_trace;
     end
     aon_wait(5);
     changed = (ps != pwr_state);
-    pwr_state = ps;
+    @(negedge clk_aon) pwr_state = ps;
     aon_wait(5);
     if (changed) pwr_pending = 1;
     if (clk_gated && ps == PS_RUN) begin
@@ -366,9 +366,9 @@ module tb_trace;
                set_power(PS_RUN, 1'b1);
              end
           1: begin                                // error freeze request
-               freeze_in = 1; settle();
+               @(negedge clk_aon) freeze_in = 1; settle();
                if (cfg.frz_err && !mdl.frozen) begin mdl.frozen = 1; mdl.n_frz_err++; end
-               freeze_in = 0; settle();
+               @(negedge clk_aon) freeze_in = 0; settle();
              end
           1: set_ctrl(1, 0, 1);                    // software freeze
         endcase
@@ -443,6 +443,7 @@ module tb_trace;
     void'($value$plusargs("timeout_ns=%d", to));
     #(to * 1ns);
     $display("TIMEOUT");
+    check(0, "test did not finish before the timeout");
     report(test, seed);
     $fatal(1, "timeout");
   end
