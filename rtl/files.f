@@ -8,6 +8,7 @@ rtl/tech/tech_pwr_switch.sv
 rtl/tech/tech_ram_sp.sv
 rtl/tech/tech_rom.sv
 rtl/tech/tech_sram_sp.sv
+rtl/tech/tech_ram_2c.sv
 rtl/common/rst_sync.sv
 rtl/common/fifo_sync.sv
 rtl/common/cdc_async_fifo.sv
@@ -29,6 +30,14 @@ rtl/cache/icache.sv
 rtl/cache/dcache.sv
 rtl/cpu/cpu_top.sv
 rtl/cpu/pd_cpu.sv
+rtl/debug/dbg_pkg.sv
+rtl/debug/dbg_gray_sync.sv
+rtl/debug/dbg_axil_slave.sv
+rtl/debug/dbg_trace.sv
+rtl/debug/dbg_evcnt.sv
+rtl/debug/dbg_errlog.sv
+rtl/debug/dbg_wdt.sv
+rtl/debug/dbg_subsys.sv
 rtl/aon/aon_mem.sv
 rtl/aon/aon_intc.sv
 rtl/aon/aon_mtimer.sv

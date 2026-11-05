@@ -7,3 +7,8 @@
 // signal used both ways; this is the intended async-assert/sync-release
 // structure. Waived for the stage array of the synchronizer cell only.
 lint_off -rule SYNCASYNCNET -file "*rtl/tech/tech_sync.sv" -match "*stage_q*"
+//
+// Debug package constants (power-state, trace-entry and trigger encodings of
+// doc/DEBUG_SPEC.md) are shared by the four debug blocks; each block uses a
+// subset.
+lint_off -rule UNUSEDPARAM -file "*rtl/debug/dbg_pkg.sv"

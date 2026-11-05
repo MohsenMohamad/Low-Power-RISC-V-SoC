@@ -105,7 +105,15 @@ module pmu #(
   output logic [1:0]        vsel_o,
 
   output logic        irq_o,
-  output logic [4:0]  state_o
+  output logic [4:0]  state_o,
+
+  // Debug observability (doc/DEBUG_SPEC.md 4.4, audit B16 / W24), registered
+  output logic [1:0]  dbg_state_o,       // stable power state: 0 RUN 1 IDLE 2 SLEEP 3 DEEP_SLEEP
+  output logic [1:0]  dbg_op_o,          // current DVFS operating point (CUR_OP)
+  output logic        dbg_evt_valid_o,   // one-cycle pulse: a transition completed or failed
+  output logic [1:0]  dbg_evt_from_o,    // stable state before the transition
+  output logic [1:0]  dbg_evt_to_o,      // requested target state
+  output logic [1:0]  dbg_evt_result_o   // 0 OK, 2 aborted (wake during entry), 3 refused (ERR_DIRTY)
 );
   // ---------------------------------------------------------------------------
   // State encoding (exported for coverage / debug)
@@ -313,6 +321,76 @@ module pmu #(
   assign state_o     = state_q;
 
   // ---------------------------------------------------------------------------
+  // Debug observability: stable power state and transition events
+  // ---------------------------------------------------------------------------
+  // The stable state changes only when a transition has completed, never on
+  // intermediate FSM states (audit W24):
+  //   RUN -> IDLE         CLK_GATE -> IDLE (clock gated, CTRL.MODE = IDLE)
+  //   RUN -> SLEEP/DEEP   PWR_OFF -> OFF   (domain switched off)
+  //   RUN -> IDLE         BUS_DRAIN -> IDLE (power-down refused, ERR_DIRTY:
+  //                       event to SLEEP/DEEP with result 3, CPU kept in IDLE)
+  //   any -> RUN          WAKE_REL -> RUN  (wake completed)
+  // An entry aborted by a wake before the core acknowledged (IDLE_REQ ->
+  // WAKE_REL) reports result 2 and leaves the state at RUN. DVFS sequences
+  // run inside IDLE and do not change the state. Result 1 (timeout) is not
+  // produced: the PMU has no timeouts (a missing power_good keeps it in
+  // PWR_ON). The state changes at most once every 4 clk_aon cycles
+  // (a_dbg_state_rate; dbg_trace relies on it).
+  localparam logic [1:0] PS_RUN = 2'd0, PS_IDLE = 2'd1, PS_SLEEP = 2'd2, PS_DSLEEP = 2'd3;
+  localparam logic [1:0] RES_OK = 2'd0, RES_ABORT = 2'd2, RES_REFUSED = 2'd3;
+  logic [1:0] dbg_ps_q, dbg_ps_d, mode_ps;
+  logic       dbg_evt_d;
+  logic [1:0] dbg_from_d, dbg_to_d, dbg_res_d;
+  logic       dbg_evt_q;
+  logic [1:0] dbg_from_q, dbg_to_q, dbg_res_q;
+
+  assign mode_ps = (mode_lat_q == MODE_IDLE) ? PS_IDLE :
+                   (mode_lat_q == MODE_DEEP) ? PS_DSLEEP : PS_SLEEP;
+
+  always_comb begin
+    dbg_ps_d   = dbg_ps_q;
+    dbg_evt_d  = 1'b0;
+    dbg_from_d = dbg_ps_q;
+    dbg_to_d   = mode_ps;
+    dbg_res_d  = RES_OK;
+    if (state_q == ST_CLK_GATE && state_d == ST_IDLE) begin
+      dbg_ps_d = PS_IDLE; dbg_evt_d = 1'b1;
+    end
+    if (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) begin
+      dbg_ps_d = PS_IDLE; dbg_evt_d = 1'b1; dbg_res_d = RES_REFUSED;
+    end
+    if (state_q == ST_PWR_OFF && state_d == ST_OFF) begin
+      dbg_ps_d = mode_ps; dbg_evt_d = 1'b1;
+    end
+    if (state_q == ST_IDLE_REQ && state_d == ST_WAKE_REL) begin
+      dbg_evt_d = 1'b1; dbg_res_d = RES_ABORT;
+    end
+    if (state_q == ST_WAKE_REL && state_d == ST_RUN && dbg_ps_q != PS_RUN) begin
+      dbg_ps_d = PS_RUN; dbg_evt_d = 1'b1; dbg_to_d = PS_RUN;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      dbg_ps_q <= PS_RUN; dbg_evt_q <= 1'b0;
+      dbg_from_q <= PS_RUN; dbg_to_q <= PS_RUN; dbg_res_q <= RES_OK;
+    end else begin
+      dbg_ps_q  <= dbg_ps_d;
+      dbg_evt_q <= dbg_evt_d;
+      if (dbg_evt_d) begin
+        dbg_from_q <= dbg_from_d; dbg_to_q <= dbg_to_d; dbg_res_q <= dbg_res_d;
+      end
+    end
+  end
+
+  assign dbg_state_o      = dbg_ps_q;
+  assign dbg_op_o         = cur_op_q;
+  assign dbg_evt_valid_o  = dbg_evt_q;
+  assign dbg_evt_from_o   = dbg_from_q;
+  assign dbg_evt_to_o     = dbg_to_q;
+  assign dbg_evt_result_o = dbg_res_q;
+
+  // ---------------------------------------------------------------------------
   // Register file
   // ---------------------------------------------------------------------------
   logic wr;
@@ -504,6 +582,54 @@ module pmu #(
   // Masked-out pending interrupt while gated / off (the case the mask exists for).
   `SVA_COVER(c_idle_masked_pending, clk_i, rst_ni, state_q == ST_IDLE && wake_src != 3'b000 && !wake)
   `SVA_COVER(c_off_masked_pending,  clk_i, rst_ni, state_q == ST_OFF  && wake_src != 3'b000 && !wake)
+
+  // Debug state / event contract (doc/DEBUG_SPEC.md 4.4).
+`ifdef PMU_CTL_USED
+  logic [2:0] dbg_age_q;   // clk_aon cycles since the stable state last changed (saturating)
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)                    dbg_age_q <= 3'd7;
+    else if (dbg_ps_d != dbg_ps_q)  dbg_age_q <= 3'd0;
+    else if (dbg_age_q != 3'd7)     dbg_age_q <= dbg_age_q + 3'd1;
+  end
+`endif
+  // The stable state changes at most once every 4 clk_aon cycles (W24).
+  `SVA_ASSERT_IMP(a_dbg_state_rate, clk_i, rst_ni, dbg_ps_d != dbg_ps_q, dbg_age_q >= 3'd3)
+  // The stable state matches the FSM: RUN-side states report RUN, the
+  // gated states IDLE, the off / wake-from-off states SLEEP or DEEP_SLEEP.
+  `SVA_ASSERT_IMP(a_dbg_ps_run, clk_i, rst_ni, state_q == ST_RUN || state_q == ST_IDLE_REQ ||
+                  state_q == ST_CLK_GATE || state_q == ST_BUS_DRAIN || state_q == ST_ISO_ON ||
+                  state_q == ST_PWR_OFF, dbg_ps_q == PS_RUN)
+  `SVA_ASSERT_IMP(a_dbg_ps_idle, clk_i, rst_ni, state_q == ST_IDLE || state_q == ST_DVFS_VUP ||
+                  state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN, dbg_ps_q == PS_IDLE)
+  `SVA_ASSERT_IMP(a_dbg_ps_off, clk_i, rst_ni, state_q == ST_OFF || state_q == ST_RET_EXIT ||
+                  state_q == ST_PWR_ON || state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF ||
+                  state_q == ST_RST_REL || state_q == ST_ISO_OFF,
+                  dbg_ps_q == (mode_lat_q == MODE_DEEP ? PS_DSLEEP : PS_SLEEP))
+  // The power-down / wake-from-off states are only reached for a SLEEP or
+  // DEEP_SLEEP request (invariant that also strengthens the induction proof).
+  `SVA_ASSERT_IMP(a_mode_lat_powerdown, clk_i, rst_ni, state_q == ST_BUS_DRAIN || state_q == ST_ISO_ON ||
+                  state_q == ST_PWR_OFF || state_q == ST_OFF || state_q == ST_RET_EXIT ||
+                  state_q == ST_PWR_ON || state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF ||
+                  state_q == ST_RST_REL || state_q == ST_ISO_OFF, mode_lat_q != MODE_IDLE)
+  // An event is reported exactly for a completed, refused or aborted transition.
+  `SVA_ASSERT_NXT(a_dbg_evt_complete, clk_i, rst_ni,
+                  (state_q == ST_CLK_GATE && state_d == ST_IDLE) ||
+                  (state_q == ST_PWR_OFF && state_d == ST_OFF),
+                  dbg_evt_valid_o && dbg_evt_result_o == RES_OK && dbg_evt_from_o == PS_RUN &&
+                  dbg_evt_to_o == dbg_state_o)
+  `SVA_ASSERT_NXT(a_dbg_evt_refused, clk_i, rst_ni, state_q == ST_BUS_DRAIN && state_d == ST_IDLE,
+                  dbg_evt_valid_o && dbg_evt_result_o == RES_REFUSED && dbg_state_o == PS_IDLE &&
+                  dbg_evt_to_o != PS_IDLE && dbg_evt_to_o != PS_RUN)
+  `SVA_ASSERT_NXT(a_dbg_evt_abort, clk_i, rst_ni, state_q == ST_IDLE_REQ && state_d == ST_WAKE_REL,
+                  dbg_evt_valid_o && dbg_evt_result_o == RES_ABORT && dbg_state_o == PS_RUN)
+  `SVA_ASSERT_IMP(a_dbg_evt_only, clk_i, rst_ni, dbg_evt_d,
+                  (state_q == ST_CLK_GATE && state_d == ST_IDLE) ||
+                  (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) ||
+                  (state_q == ST_PWR_OFF && state_d == ST_OFF) ||
+                  (state_q == ST_IDLE_REQ && state_d == ST_WAKE_REL) ||
+                  (state_q == ST_WAKE_REL && state_d == ST_RUN))
+  `SVA_COVER(c_dbg_evt_wake,   clk_i, rst_ni, dbg_evt_valid_o && dbg_evt_to_o == PS_RUN)
+  `SVA_COVER(c_dbg_evt_refuse, clk_i, rst_ni, dbg_evt_valid_o && dbg_evt_result_o == RES_REFUSED)
 
   // Transition coverage (every FSM arc).
   `SVA_COVER(c_run_idlereq,      clk_i, rst_ni, state_q == ST_RUN         && state_d == ST_IDLE_REQ)

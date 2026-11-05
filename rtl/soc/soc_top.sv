@@ -24,6 +24,8 @@
 //   CPU reset release/ack  clk_aon <-> root     u_clk_rst
 //   DVFS select / status   clk_aon <-> clk_op   u_dvfs_mux / u_dvfs_sync
 //   ext_wake_i, uart_rx_i  async -> clk_aon     tech_sync in u_aon
+//   debug observability    clk_cpu (isolated) -> debug blocks' clk_cpu front end in u_aon;
+//                          the blocks cross to clk_aon internally (doc/DEBUG_SPEC.md 1.1)
 // -----------------------------------------------------------------------------
 module soc_top #(
   parameter ROM_INIT       = "",
@@ -41,7 +43,8 @@ module soc_top #(
   parameter logic [31:0] ROM_MASK       = 32'hFFFF_C000,   // 16 KB, cacheable (I-side)
   parameter logic [31:0] RAM_BASE       = 32'h1000_0000,
   parameter logic [31:0] RAM_MASK       = 32'hFFFE_0000,   // 128 KB, cacheable
-  parameter logic [31:0] RAM_ALIAS_BASE = 32'h3000_0000    // 128 KB uncached alias of RAM
+  parameter logic [31:0] RAM_ALIAS_BASE = 32'h3000_0000,   // 128 KB uncached alias of RAM
+  parameter int unsigned TRACE_DEPTH    = 64               // debug trace buffer entries (16..128)
 ) (
   input  logic       clk_aon_i,
   input  logic [2:0] clk_op_i,
@@ -105,6 +108,9 @@ module soc_top #(
   logic [2:0]  c_awprot, c_arprot;
   logic [3:0]  c_wstrb;
   logic        c_idle_ack, c_core_sleep, c_cache_clean, c_mtime_req;
+  // debug observability (doc/DEBUG_SPEC.md 4.2 / 4.3)
+  logic        c_ret_valid, c_trap_valid, c_ic_hit, c_ic_miss, c_dc_hit, c_dc_miss, c_stall;
+  logic [31:0] c_ret_pc, c_ret_insn, c_trap_cause, c_trap_pc, c_trap_tval;
 
   // bridge -> PD_CPU
   logic        b_awready, b_wready, b_bvalid, b_arready, b_rvalid;
@@ -132,14 +138,18 @@ module soc_top #(
     .m_wvalid_o (c_wvalid), .m_wready_i (b_wready), .m_wdata_o (c_wdata), .m_wstrb_o (c_wstrb),
     .m_bvalid_i (b_bvalid), .m_bready_o (c_bready), .m_bresp_i (b_bresp),
     .m_arvalid_o (c_arvalid), .m_arready_i (b_arready), .m_araddr_o (c_araddr), .m_arprot_o (c_arprot),
-    .m_rvalid_i (b_rvalid), .m_rready_o (c_rready), .m_rdata_i (b_rdata), .m_rresp_i (b_rresp)
+    .m_rvalid_i (b_rvalid), .m_rready_o (c_rready), .m_rdata_i (b_rdata), .m_rresp_i (b_rresp),
+    .dbg_ret_valid_o (c_ret_valid), .dbg_ret_pc_o (c_ret_pc), .dbg_ret_insn_o (c_ret_insn),
+    .dbg_trap_valid_o (c_trap_valid), .dbg_trap_cause_o (c_trap_cause), .dbg_trap_pc_o (c_trap_pc),
+    .dbg_trap_tval_o (c_trap_tval), .dbg_ic_hit_o (c_ic_hit), .dbg_ic_miss_o (c_ic_miss),
+    .dbg_dc_hit_o (c_dc_hit), .dbg_dc_miss_o (c_dc_miss), .dbg_stall_o (c_stall)
   );
 
   // ---------------------------------------------------------------------------
   // Isolation of every PD_CPU output (clamp 0), located in PD_AON
   // ---------------------------------------------------------------------------
   logic        iso_en;
-  localparam int ISO_W = 1+32+3 + 1+32+4 + 1 + 1+32+3 + 1 + 4;
+  localparam int ISO_W = 1+32+3 + 1+32+4 + 1 + 1+32+3 + 1 + 4 + (1+32+32 + 1+32+32+32 + 5);
   logic [ISO_W-1:0] iso_in, iso_out;
 
   logic        i_awvalid, i_wvalid, i_bready, i_arvalid, i_rready;
@@ -147,10 +157,14 @@ module soc_top #(
   logic [2:0]  i_awprot, i_arprot;
   logic [3:0]  i_wstrb;
   logic        i_idle_ack, i_core_sleep, i_cache_clean;
+  logic        i_ret_valid, i_trap_valid, i_ic_hit, i_ic_miss, i_dc_hit, i_dc_miss, i_stall;
+  logic [31:0] i_ret_pc, i_ret_insn, i_trap_cause, i_trap_pc, i_trap_tval;
 
   assign iso_in = {c_awvalid, c_awaddr, c_awprot, c_wvalid, c_wdata, c_wstrb, c_bready,
                    c_arvalid, c_araddr, c_arprot, c_rready,
-                   c_idle_ack, c_core_sleep, c_cache_clean, c_mtime_req};
+                   c_idle_ack, c_core_sleep, c_cache_clean, c_mtime_req,
+                   c_ret_valid, c_ret_pc, c_ret_insn, c_trap_valid, c_trap_cause, c_trap_pc, c_trap_tval,
+                   c_ic_hit, c_ic_miss, c_dc_hit, c_dc_miss, c_stall};
 
   tech_iso #(.WIDTH(ISO_W), .CLAMP('0)) u_iso (
     .iso_en_i (iso_en), .d_i (iso_in), .q_o (iso_out)
@@ -158,7 +172,9 @@ module soc_top #(
 
   assign {i_awvalid, i_awaddr, i_awprot, i_wvalid, i_wdata, i_wstrb, i_bready,
           i_arvalid, i_araddr, i_arprot, i_rready,
-          i_idle_ack, i_core_sleep, i_cache_clean, i_mtime_req} = iso_out;
+          i_idle_ack, i_core_sleep, i_cache_clean, i_mtime_req,
+          i_ret_valid, i_ret_pc, i_ret_insn, i_trap_valid, i_trap_cause, i_trap_pc, i_trap_tval,
+          i_ic_hit, i_ic_miss, i_dc_hit, i_dc_miss, i_stall} = iso_out;
 
   // ---------------------------------------------------------------------------
   // CPU -> AON bus crossing
@@ -204,7 +220,7 @@ module soc_top #(
     .ROM_INIT (ROM_INIT), .VSETTLE_CYCLES (VSETTLE_CYCLES), .RET_CYCLES (RET_CYCLES),
     .ISO_CYCLES (ISO_CYCLES), .RST_CLK_CYCLES (RST_CLK_CYCLES), .RESET_OP (RESET_OP),
     .ROM_BASE (ROM_BASE), .ROM_MASK (ROM_MASK), .RAM_BASE (RAM_BASE), .RAM_MASK (RAM_MASK),
-    .RAM_ALIAS_BASE (RAM_ALIAS_BASE)
+    .RAM_ALIAS_BASE (RAM_ALIAS_BASE), .TRACE_DEPTH (TRACE_DEPTH)
   ) u_aon (
     .clk_i (clk_aon_i), .rst_ni (rst_aon_n),
     .s_awvalid_i (a_awvalid), .s_awready_o (a_awready), .s_awaddr_i (a_awaddr), .s_awprot_i (a_awprot),
@@ -220,7 +236,13 @@ module soc_top #(
     .iso_en_o (iso_en), .cpu_rst_no (cpu_rst_req_n), .cpu_rst_ack_i (cpu_rst_ack),
     .pwr_sw_en_o (pwr_sw_en), .pwr_good_i (pwr_good),
     .dvfs_sel_o (dvfs_sel), .dvfs_active_i (dvfs_active_s), .vsel_o (vsel_o),
-    .pmu_state_o (pmu_state)
+    .pmu_state_o (pmu_state),
+    // debug blocks: clk_cpu front end, isolated PD_CPU observability outputs
+    .clk_cpu_i (clk_cpu),
+    .dbg_ret_valid_i (i_ret_valid), .dbg_ret_pc_i (i_ret_pc), .dbg_ret_insn_i (i_ret_insn),
+    .dbg_trap_valid_i (i_trap_valid), .dbg_trap_cause_i (i_trap_cause), .dbg_trap_pc_i (i_trap_pc),
+    .dbg_trap_tval_i (i_trap_tval), .dbg_ic_hit_i (i_ic_hit), .dbg_ic_miss_i (i_ic_miss),
+    .dbg_dc_hit_i (i_dc_hit), .dbg_dc_miss_i (i_dc_miss), .dbg_stall_i (i_stall)
   );
 
   logic unused;

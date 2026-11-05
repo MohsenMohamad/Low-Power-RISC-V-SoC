@@ -1,6 +1,0 @@
-`verilator_config
-// Package constants are shared by all blocks; each block uses a subset.
-lint_off -rule UNUSEDPARAM -file "*dbg_pkg.sv"
-// Reset synchroniser: its flops are reset asynchronously and their output is
-// used as an asynchronous reset downstream, by design.
-lint_off -rule SYNCASYNCNET -file "*dbg_rst_sync.sv"

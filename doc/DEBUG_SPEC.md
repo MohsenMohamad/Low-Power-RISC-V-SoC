@@ -18,7 +18,7 @@ doc/SPEC.md wins.
 | Event counters | `dbg_evcnt` | Cache hit/miss, stall cycles, time per power state, wake / DVFS counts |
 | Error log   | `dbg_errlog` | Last exception, last power transition + result, sticky error status |
 | Watchdog    | `dbg_wdt`    | Hang detection, logs to error log, requests PD_CPU reset        |
-| Wrapper     | `dbg_subsys` | Optional: one AXI4-Lite port + 4 blocks + internal wiring       |
+| Wrapper     | `dbg_subsys` | One AXI4-Lite port + 4 blocks + internal wiring; instantiated in `aon_subsys` (`u_dbg`) |
 
 All four blocks:
 
@@ -32,10 +32,9 @@ All four blocks:
   PD_CPU is off `clk_cpu` is gated and the PD_CPU outputs are clamped to 0 by
   the isolation cells, so the front end is simply idle);
 * contain their own reset synchronisers (async assert, sync de-assert) per clock;
-* use only the `dbg_sync` (2-flop synchroniser) and `dbg_ram_2c` (two-clock
-  simple dual-port RAM) wrappers for technology cells. **[MERGE]** these wrapper
-  bodies are replaced by the SoC-wide synchroniser / RAM wrappers of the SoC
-  top area; the port lists are kept.
+* use only the SoC technology wrappers (doc/SPEC.md): `tech_sync`
+  (synchroniser), `rst_sync` (reset synchroniser, built on `tech_sync`) and
+  `tech_ram_2c` (two-clock simple dual-port RAM, `rtl/tech/`).
 
 ### 1.1 Clock-domain crossings (all inside the blocks)
 
@@ -96,64 +95,91 @@ from nothing else (there is no second bus master).
 
 ---
 
-## 4. Input / output ports (connected at merge)
+## 4. Input / output ports and their SoC connections
 
-Domain column: `cpu` = synchronous to `clk_cpu`, from PD_CPU (must be isolated
-to 0 when PD_CPU is off); `aon` = synchronous to `clk_aon`.
+`dbg_subsys` is instantiated in `aon_subsys` (`u_dbg`). Domain column: `cpu` =
+synchronous to `clk_cpu`, from PD_CPU, isolated to 0 by `soc_top.u_iso` while
+PD_CPU is isolated; `aon` = synchronous to `clk_aon`.
 
 ### 4.1 Common
 
-| Port | Dir | Width | Domain | Description |
+| Port | Dir | Width | Domain | Connected to |
 |------|-----|-------|--------|-------------|
-| `clk_aon_i` | in | 1 | – | AON clock (AXI and registers) |
-| `rst_aon_ni` | in | 1 | async | AON power-on reset, active low |
-| `clk_cpu_i` | in | 1 | – | PD_CPU clock after DVFS mux / gate (trace, evcnt, errlog) |
-| `s_axil_*` | – | – | aon | AXI4-Lite slave, `ADDR_W=12`, 32-bit data |
+| `clk_aon_i` | in | 1 | – | `clk_aon` |
+| `rst_aon_ni` | in | 1 | async | AON reset (`soc_top.rst_aon_n`, from POR) |
+| `clk_cpu_i` | in | 1 | – | `clk_cpu` (after the DVFS mux and the PMU clock gate) |
+| `s_axil_*` | – | – | aon | interconnect slave 7 of `aon_subsys` (`0x2000_8000`, 16 KB), `ADDR_W=14` |
 
-### 4.2 CPU retire / trap port (from the CPU, Session 1) **[MERGE]**
+### 4.2 CPU retire / trap port
+
+Driven by `cpu_top` (`dbg_ret_*`, `dbg_trap_*`; doc/CPU_SOC_INTERFACE.md
+"Debug observability"), flop outputs, one `clk_cpu` cycle after the event.
 
 | Port | Width | Domain | Description |
 |------|-------|--------|-------------|
-| `ret_valid_i` | 1 | cpu | one instruction retired this cycle |
+| `ret_valid_i` | 1 | cpu | one instruction retired (committed and not trapped) |
 | `ret_pc_i` | 32 | cpu | PC of the retired instruction |
-| `ret_insn_i` | 32 | cpu | instruction word (16-bit encodings zero-extended) |
-| `trap_valid_i` | 1 | cpu | a trap is taken this cycle |
+| `ret_insn_i` | 32 | cpu | instruction word |
+| `trap_valid_i` | 1 | cpu | a trap was taken: exception or interrupt entry |
 | `trap_cause_i` | 32 | cpu | `mcause` value written by the trap (bit 31 = interrupt) |
 | `trap_pc_i` | 32 | cpu | `mepc` value written by the trap |
 | `trap_tval_i` | 32 | cpu | `mtval` value written by the trap |
 
-Contract: `ret_valid_i` and `trap_valid_i` may be high in the same cycle
-(older instruction retires while the trap is taken); `ret_valid_i` shall not be
-high in the cycle that follows `trap_valid_i` (pipeline flush). This is
-checked by an SVA assumption in the trace testbench.
+Contract: `ret_valid_i` shall not be high in the cycle that follows
+`trap_valid_i` (pipeline flush); the blocks also accept both in the same
+cycle (older instruction retires while the trap is taken; trace order
+retire, trap), which the in-house core never produces (asserted in
+`cpu_top`: `a_dbg_ret_trap_excl`, `a_dbg_no_ret_after_trap`). The trace
+testbench assumes the contract.
 
 "Exception" below means a trap with `trap_cause_i[31] == 0`.
 
-### 4.3 Cache / pipeline event port (from CPU + caches, Session 1) **[MERGE]**
+### 4.3 Cache / pipeline event port
+
+Driven by `cpu_top` (`dbg_ic_*`, `dbg_dc_*`, `dbg_stall_o`; definitions in
+doc/CPU_SOC_INTERFACE.md "Debug observability").
 
 | Port | Width | Domain | Description |
 |------|-------|--------|-------------|
-| `ic_hit_i` | 1 | cpu | I-cache lookup hit (one pulse per lookup) |
+| `ic_hit_i` | 1 | cpu | I-cache lookup hit (one pulse per cacheable fetch lookup) |
 | `ic_miss_i` | 1 | cpu | I-cache lookup miss |
-| `dc_hit_i` | 1 | cpu | D-cache lookup hit |
+| `dc_hit_i` | 1 | cpu | D-cache lookup hit (one pulse per cacheable load / store lookup) |
 | `dc_miss_i` | 1 | cpu | D-cache lookup miss |
-| `stall_i` | 1 | cpu | pipeline stalled this cycle (any reason) |
+| `stall_i` | 1 | cpu | pipeline stall: a valid instruction is held in its stage this cycle |
 
-### 4.4 Power port (from the PMU, Session 2) **[MERGE]**
+### 4.4 Power port
+
+Driven by the PMU (`pmu.dbg_*`, registered). The power state is the
+*stable* state, derived from completed transitions, not from the PMU FSM
+(audit B16 / W24):
+
+| PMU event | `pwr_state_i` becomes | `pmu_evt_*` (from, to, result) |
+|---|---|---|
+| IDLE entry completed (`CLK_GATE -> IDLE`) | IDLE | RUN, IDLE, 0 OK |
+| SLEEP / DEEP_SLEEP entry completed (`PWR_OFF -> OFF`) | SLEEP / DEEP_SLEEP | RUN, SLEEP / DEEP_SLEEP, 0 OK |
+| power-down refused (`BUS_DRAIN -> IDLE`, `STATUS.ERR_DIRTY`) | IDLE | RUN, SLEEP / DEEP_SLEEP, 3 refused |
+| entry aborted by a wake before the core acknowledged (`IDLE_REQ -> WAKE_REL`) | (stays RUN) | RUN, requested state, 2 aborted |
+| wake completed (`WAKE_REL -> RUN` from IDLE, SLEEP or DEEP_SLEEP) | RUN | old state, RUN, 0 OK |
+
+DVFS sequences run while the state is IDLE and do not change it; the
+operating point changes when the sequence has completed (`CUR_OP`).
 
 | Port | Width | Domain | Description |
 |------|-------|--------|-------------|
-| `pwr_state_i` | 2 | aon | current CPU power state (§3.1) |
-| `dvfs_op_i` | 2 | aon | current DVFS operating point (0..2) |
-| `pmu_evt_valid_i` | 1 | aon | one-cycle pulse when a power transition completes or fails |
-| `pmu_evt_from_i` | 2 | aon | state before the transition |
+| `pwr_state_i` | 2 | aon | stable CPU power state (§3.1) |
+| `dvfs_op_i` | 2 | aon | current DVFS operating point (0..2, PMU `STATUS.CUR_OP`) |
+| `pmu_evt_valid_i` | 1 | aon | one-cycle pulse when a power transition completes, is refused or is aborted |
+| `pmu_evt_from_i` | 2 | aon | stable state before the transition |
 | `pmu_evt_to_i` | 2 | aon | requested target state |
-| `pmu_evt_result_i` | 2 | aon | 0 OK, 1 timeout (e.g. no `power_good`), 2 aborted (wake during entry), 3 sequencing error |
+| `pmu_evt_result_i` | 2 | aon | 0 OK, 1 timeout (not produced: the PMU has no timeouts), 2 aborted (wake during entry), 3 refused (power-down condition not met, `ERR_DIRTY`) |
 
-Requirement: `pwr_state_i` changes at most once every 4 `clk_aon` cycles
-(PMU sequencing is far slower; assumed in the trace testbench).
+`pwr_state_i` changes at most once every 4 `clk_aon` cycles: asserted in the
+PMU (`a_dbg_state_rate`) and proven with SymbiYosys (`make formal`), assumed
+by the trace testbench. The event contract is asserted in the PMU
+(`a_dbg_evt_complete`, `a_dbg_evt_refused`, `a_dbg_evt_abort`,
+`a_dbg_evt_only`).
 
-### 4.5 Block-to-block wiring (done inside `dbg_subsys`, or at the SoC top)
+### 4.5 Block-to-block wiring (inside `dbg_subsys`)
 
 | From | Port | To | Port | Meaning |
 |------|------|----|------|---------|
@@ -166,9 +192,9 @@ Requirement: `pwr_state_i` changes at most once every 4 `clk_aon` cycles
 
 | Port | Block | Domain | Description |
 |------|-------|--------|-------------|
-| `cpu_rst_req_o` | wdt | aon | PD_CPU reset request, high for `RST_PULSE` (16) clk_aon cycles. **[MERGE]** PMU performs the reset (and powers PD_CPU on if needed). |
-| `irq_o` | wdt | aon | bark (pre-timeout) interrupt, level, cleared by `STATUS.BARK` W1C or kick |
-| `irq_o` | errlog | aon | `|(STATUS & IRQ_EN)`, level |
+| `cpu_rst_req_o` | wdt | aon | PD_CPU reset request, high for `RST_PULSE` (16) clk_aon cycles |
+| `wdt_irq_o` | wdt | aon | bark (pre-timeout) interrupt, level, cleared by `STATUS.BARK` W1C or kick |
+| `err_irq_o` | errlog | aon | `|(STATUS & IRQ_EN)`, level |
 
 ---
 

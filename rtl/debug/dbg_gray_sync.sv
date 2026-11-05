@@ -16,7 +16,7 @@ module dbg_gray_sync #(
     if (!rst_src_ni) gray_q <= '0;
     else             gray_q <= bin_i ^ (bin_i >> 1);
   end
-  dbg_sync #(.WIDTH(WIDTH)) u_sync (
+  tech_sync #(.WIDTH(WIDTH)) u_sync (
     .clk_i(clk_dst_i), .rst_ni(rst_dst_ni), .d_i(gray_q), .q_o(gray_dst)
   );
   always_comb begin

@@ -55,7 +55,20 @@ module pd_cpu #(
   input  logic        m_rvalid_i,
   output wire         m_rready_o,
   input  logic [31:0] m_rdata_i,
-  input  logic [1:0]  m_rresp_i
+  input  logic [1:0]  m_rresp_i,
+  // Debug observability (clk_cpu, flop outputs; doc/CPU_SOC_INTERFACE.md)
+  output wire         dbg_ret_valid_o,
+  output wire  [31:0] dbg_ret_pc_o,
+  output wire  [31:0] dbg_ret_insn_o,
+  output wire         dbg_trap_valid_o,
+  output wire  [31:0] dbg_trap_cause_o,
+  output wire  [31:0] dbg_trap_pc_o,
+  output wire  [31:0] dbg_trap_tval_o,
+  output wire         dbg_ic_hit_o,
+  output wire         dbg_ic_miss_o,
+  output wire         dbg_dc_hit_o,
+  output wire         dbg_dc_miss_o,
+  output wire         dbg_stall_o
 );
   // ---------------- the single synchronization point ----------------
   logic meip_s, mtip_s, msip_s, idle_req_s;
@@ -91,7 +104,10 @@ module pd_cpu #(
     .trace_valid_o (), .trace_irq_o (), .trace_trap_o (), .trace_pc_o (), .trace_insn_o (),
     .trace_next_pc_o (), .trace_cause_o (), .trace_tval_o (), .trace_rd_we_o (), .trace_rd_o (),
     .trace_rd_wdata_o (), .trace_mem_we_o (), .trace_mem_re_o (), .trace_mem_addr_o (),
-    .trace_mem_wdata_o (), .trace_mem_be_o (), .trace_mip_o ()
+    .trace_mem_wdata_o (), .trace_mem_be_o (), .trace_mip_o (),
+    .dbg_ret_valid_o, .dbg_ret_pc_o, .dbg_ret_insn_o, .dbg_trap_valid_o, .dbg_trap_cause_o,
+    .dbg_trap_pc_o, .dbg_trap_tval_o, .dbg_ic_hit_o, .dbg_ic_miss_o, .dbg_dc_hit_o,
+    .dbg_dc_miss_o, .dbg_stall_o
   );
   /* verilator lint_on PINCONNECTEMPTY */
 

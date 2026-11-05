@@ -11,6 +11,7 @@ module tb_dcache;
   always #5 clk = ~clk;
 
   axil_if  axi (clk);
+  logic ev_hit, ev_miss;   // debug event outputs (doc/CPU_SOC_INTERFACE.md)
   cache_if cif (clk);
 
   dcache #(.CACHE_BASE(32'h8000_0000), .CACHE_MASK(32'hFFFE_0000)) dut (
@@ -24,7 +25,7 @@ module tb_dcache;
     .m_bvalid (axi.bvalid), .m_bready (axi.bready), .m_bresp (axi.bresp),
     .m_arvalid (axi.arvalid), .m_arready (axi.arready), .m_araddr (axi.araddr), .m_arprot (axi.arprot),
     .m_rvalid (axi.rvalid), .m_rready (axi.rready), .m_rdata (axi.rdata), .m_rresp (axi.rresp),
-    .idle_o ()
+    .idle_o (), .ev_hit_o (ev_hit), .ev_miss_o (ev_miss)
   );
 
   // ---------------------------------------------------------------------------
@@ -129,12 +130,24 @@ module tb_dcache;
   // Replacement-policy reference model (sampled mid-cycle on stable state)
   // ---------------------------------------------------------------------------
   repl_model repl = new("dcache");
+  int ev_hits, ev_misses;
   logic [4:0] prev_state;
   always @(negedge clk) begin
     if (!rst_n) begin
       prev_state <= 5'd0;
     end else begin
       if (lookup && prev_state != 5'd7) repl.lookup(dut.rq_addr_q, dut.hit, dut.hit_way, dut.victim_sel);
+      // debug events: exactly one hit or miss pulse per first lookup (the
+      // replay lookup after a refill and every other cycle: none)
+      if (lookup && prev_state != 5'd7) begin
+        if (ev_hit !== dut.hit || ev_miss !== !dut.hit)
+          repl.err($sformatf("debug event mismatch addr=%h hit=%0d ev_hit=%0d ev_miss=%0d",
+                             dut.rq_addr_q, dut.hit, ev_hit, ev_miss));
+      end else if (ev_hit !== 1'b0 || ev_miss !== 1'b0) begin
+        repl.err($sformatf("debug event outside a first lookup (state %0d)", dut.state_q));
+      end
+      ev_hits += int'(ev_hit === 1'b1);
+      ev_misses += int'(ev_miss === 1'b1);
       if (dut.state_q == 5'd7) repl.filled();                       // REPLAY: refill succeeded
       if (cif.maint_done && cif.maint_inval) repl.inval_all();
       prev_state <= dut.state_q;
@@ -266,6 +279,10 @@ module tb_dcache;
 
     agt.report();
     repl.report();
+    $display("[tb_dcache] debug events: %0d hits + %0d misses (model: %0d lookups, %0d hits)",
+             ev_hits, ev_misses, repl.n_lookups, repl.n_hits);
+    if (ev_hits != repl.n_hits || ev_hits + ev_misses != repl.n_lookups)
+      repl.err("debug event totals differ from the reference model");
     agt.n_mismatch += repl.n_errors;
     if (agt.n_mismatch == 0) $display("[tb_dcache] PASS");
     else $display("[tb_dcache] FAIL mismatches=%0d", agt.n_mismatch);

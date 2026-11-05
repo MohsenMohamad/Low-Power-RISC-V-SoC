@@ -52,8 +52,8 @@ module dbg_trace
 
   // ======================= resets =======================
   logic rst_a_n, rst_c_n;
-  dbg_rst_sync u_rs_a (.clk_i(clk_aon_i), .rst_ni(rst_aon_ni), .rst_no(rst_a_n));
-  dbg_rst_sync u_rs_c (.clk_i(clk_cpu_i), .rst_ni(rst_aon_ni), .rst_no(rst_c_n));
+  rst_sync u_rs_a (.clk_i(clk_aon_i), .arst_ni(rst_aon_ni), .rst_no(rst_a_n));
+  rst_sync u_rs_c (.clk_i(clk_cpu_i), .arst_ni(rst_aon_ni), .rst_no(rst_c_n));
 
   // ======================= AON: registers =======================
   logic        reg_we, reg_re, reg_werr, reg_rerr;
@@ -154,12 +154,12 @@ module dbg_trace
   logic [3:0]  pwr_cnt_c;
   logic [31:0] ts_c;
 
-  dbg_sync #(.WIDTH(7)) u_s_ctl (
+  logic unused_c0;
+  tech_sync #(.WIDTH(7)) u_s_ctl (
     .clk_i(clk_cpu_i), .rst_ni(rst_c_n),
     .d_i({en_q, frz_req_a, clr_req_q, log_trap_q, log_pwr_q, frz_exc_q, 1'b0}),
     .q_o({en_c, frz_req_c, clr_req_c, log_trap_c, log_pwr_c, frz_exc_c, unused_c0}));
-  logic unused_c0;
-  dbg_sync #(.WIDTH(2)) u_s_pnew (.clk_i(clk_cpu_i), .rst_ni(rst_c_n), .d_i(pwr_new_q), .q_o(pwr_new_c));
+  tech_sync #(.WIDTH(2)) u_s_pnew (.clk_i(clk_cpu_i), .rst_ni(rst_c_n), .d_i(pwr_new_q), .q_o(pwr_new_c));
   dbg_gray_sync #(.WIDTH(4)) u_g_pcnt (
     .clk_src_i(clk_aon_i), .rst_src_ni(rst_a_n), .bin_i(pwr_cnt_q),
     .clk_dst_i(clk_cpu_i), .rst_dst_ni(rst_c_n), .bin_o(pwr_cnt_c));
@@ -282,7 +282,7 @@ module dbg_trace
   assign ram_re    = reg_re && reg_raddr[11];
   assign ram_raddr = reg_raddr[AW+3:4];
 
-  dbg_ram_2c #(.DEPTH(DEPTH), .WIDTH(128)) u_ram (
+  tech_ram_2c #(.DEPTH(DEPTH), .WIDTH(128)) u_ram (
     .clk_w_i(clk_cpu_i), .we_i(f_pop && !clr_c), .waddr_i(wcnt_q[AW-1:0]), .wdata_i(fifo_q[frd_q]),
     .clk_r_i(clk_aon_i), .re_i(ram_re), .raddr_i(ram_raddr), .rdata_o(ram_rd));
 
@@ -292,7 +292,7 @@ module dbg_trace
   dbg_gray_sync #(.WIDTH(32)) u_g_wcnt (
     .clk_src_i(clk_cpu_i), .rst_src_ni(rst_c_n), .bin_i(wcnt_q),
     .clk_dst_i(clk_aon_i), .rst_dst_ni(rst_a_n), .bin_o(wcnt_a));
-  dbg_sync #(.WIDTH(6)) u_s_st (
+  tech_sync #(.WIDTH(6)) u_s_st (
     .clk_i(clk_aon_i), .rst_ni(rst_a_n),
     .d_i({cst_q == C_ACTIVE, cst_q == C_ARMED, cst_q == C_STOPPED, frozen_q, ovf_q, clr_ack_q}),
     .q_o({st_active_a, st_armed_a, st_stopped_a, st_frozen_a, st_ovf_a, clr_ack_a}));

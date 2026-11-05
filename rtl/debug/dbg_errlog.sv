@@ -52,8 +52,8 @@ module dbg_errlog
                           S_WDT_RST = 4, S_SW_ERR = 5, NS = 6;
 
   logic rst_a_n, rst_c_n;
-  dbg_rst_sync u_rs_a (.clk_i(clk_aon_i), .rst_ni(rst_aon_ni), .rst_no(rst_a_n));
-  dbg_rst_sync u_rs_c (.clk_i(clk_cpu_i), .rst_ni(rst_aon_ni), .rst_no(rst_c_n));
+  rst_sync u_rs_a (.clk_i(clk_aon_i), .arst_ni(rst_aon_ni), .rst_no(rst_a_n));
+  rst_sync u_rs_c (.clk_i(clk_cpu_i), .arst_ni(rst_aon_ni), .rst_no(rst_c_n));
 
   logic        reg_we, reg_re, reg_werr, reg_rerr;
   logic [11:0] reg_waddr, reg_raddr, reg_raddr_q;
@@ -111,8 +111,8 @@ module dbg_errlog
   // ======================= crossings =======================
   logic req_a, ack_a_q;
   logic [3:0] drop_a, drop_seen_q;
-  dbg_sync u_s_req (.clk_i(clk_aon_i), .rst_ni(rst_a_n), .d_i(req_c_q), .q_o(req_a));
-  dbg_sync u_s_ack (.clk_i(clk_cpu_i), .rst_ni(rst_c_n), .d_i(ack_a_q), .q_o(ack_c));
+  tech_sync u_s_req (.clk_i(clk_aon_i), .rst_ni(rst_a_n), .d_i(req_c_q), .q_o(req_a));
+  tech_sync u_s_ack (.clk_i(clk_cpu_i), .rst_ni(rst_c_n), .d_i(ack_a_q), .q_o(ack_c));
   dbg_gray_sync #(.WIDTH(4)) u_g_drop (
     .clk_src_i(clk_cpu_i), .rst_src_ni(rst_c_n), .bin_i(drop_c_q),
     .clk_dst_i(clk_aon_i), .rst_dst_ni(rst_a_n), .bin_o(drop_a));

@@ -44,8 +44,8 @@ module dbg_evcnt
   localparam int unsigned NC = 5;   // clk_cpu counters
 
   logic rst_a_n, rst_c_n;
-  dbg_rst_sync u_rs_a (.clk_i(clk_aon_i), .rst_ni(rst_aon_ni), .rst_no(rst_a_n));
-  dbg_rst_sync u_rs_c (.clk_i(clk_cpu_i), .rst_ni(rst_aon_ni), .rst_no(rst_c_n));
+  rst_sync u_rs_a (.clk_i(clk_aon_i), .arst_ni(rst_aon_ni), .rst_no(rst_a_n));
+  rst_sync u_rs_c (.clk_i(clk_cpu_i), .arst_ni(rst_aon_ni), .rst_no(rst_c_n));
 
   logic        reg_we, reg_re, reg_werr, reg_rerr;
   logic [11:0] reg_waddr, reg_raddr, reg_raddr_q;
@@ -79,7 +79,7 @@ module dbg_evcnt
 
   // ---------------- clk_cpu counters ----------------
   logic frozen_c, clr_req_c, clr_seen_q, clr_ack_q;
-  dbg_sync #(.WIDTH(2)) u_s_ctl (.clk_i(clk_cpu_i), .rst_ni(rst_c_n),
+  tech_sync #(.WIDTH(2)) u_s_ctl (.clk_i(clk_cpu_i), .rst_ni(rst_c_n),
                                  .d_i({frozen, clr_req_q}), .q_o({frozen_c, clr_req_c}));
   wire clr_c = (clr_req_c != clr_seen_q);
 
@@ -117,7 +117,7 @@ module dbg_evcnt
   end
   logic [NC-1:0] ovf_a, ovf_prev_q;
   logic          clr_ack_a;
-  dbg_sync #(.WIDTH(NC + 1)) u_s_back (.clk_i(clk_aon_i), .rst_ni(rst_a_n),
+  tech_sync #(.WIDTH(NC + 1)) u_s_back (.clk_i(clk_aon_i), .rst_ni(rst_a_n),
                                        .d_i({ovf_c, clr_ack_q}), .q_o({ovf_a, clr_ack_a}));
 
   wire clr_pend = (clr_req_q != clr_ack_a);

@@ -42,7 +42,7 @@ module dbg_wdt
   output logic        irq_o
 );
   logic rst_a_n;
-  dbg_rst_sync u_rs_a (.clk_i(clk_aon_i), .rst_ni(rst_aon_ni), .rst_no(rst_a_n));
+  rst_sync u_rs_a (.clk_i(clk_aon_i), .arst_ni(rst_aon_ni), .rst_no(rst_a_n));
 
   logic        reg_we, reg_re, reg_werr, reg_rerr;
   logic [11:0] reg_waddr, reg_raddr, reg_raddr_q;
