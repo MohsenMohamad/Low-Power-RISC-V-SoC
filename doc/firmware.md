@@ -88,7 +88,7 @@ prints one line per test and a final summary:
 
 ```
 [TEST  42] pm_sleep_resume              PASS
-SUITE DONE pass=46 fail=0 skip=0 signature=0x600d002e
+SUITE DONE pass=45 fail=0 skip=0 signature=0x600d002d
 SUITE RESULT: PASS
 PASS
 ```
@@ -146,7 +146,7 @@ finishes the test in its `after_reboot()` function.
 | 76 | bus_errors_access_rules | SLVERR -> precise access fault for unmapped regions / offsets, writes to RO registers, partial writes; the register keeps its value | pmu, intc, uart, wtimer |
 | 98, 99 | selftest_* | only with `-DSUITE_SELFTEST`: one must SKIP, one must FAIL | |
 
-On Spike the tests that need SoC peripherals are skipped (26 tests); the
+On Spike the tests that need SoC peripherals are skipped (27 tests); the
 required list for Spike names exactly the tests that must run.
 
 ## UART monitor
