@@ -1,9 +1,16 @@
 // CPU subsystem (contents of power domain PD_CPU): RV32IM core, 4 KB I-cache,
 // 4 KB write-back D-cache and a 2:1 AXI4-Lite mux to a single master port.
+//
+// Cacheable windows: (addr & MASK) == BASE. The defaults are the doc/SPEC.md
+// address map (boot ROM 0x0000_0000 16 KB, RAM 0x1000_0000 128 KB); the SoC
+// sets them explicitly from its own address-map parameters (pd_cpu).
+//
+// All inputs are synchronous to clk. Asynchronous SoC signals are synchronized
+// once, in pd_cpu, before they reach this module (doc/CPU_SOC_INTERFACE.md).
 module cpu_top #(
   parameter logic [31:0] ROM_BASE = 32'h0000_0000,
   parameter logic [31:0] ROM_MASK = 32'hFFFF_C000,  // 16 KB
-  parameter logic [31:0] RAM_BASE = 32'h8000_0000,
+  parameter logic [31:0] RAM_BASE = 32'h1000_0000,
   parameter logic [31:0] RAM_MASK = 32'hFFFE_0000   // 128 KB
 ) (
   input  logic        clk,
@@ -15,8 +22,12 @@ module cpu_top #(
   input  logic        irq_external_i,
   input  logic [63:0] mtime_i,
 
-  output logic        core_sleep_o,
-  output logic        caches_idle_o,
+  // Power handshake (doc/CPU_SOC_INTERFACE.md). All outputs are flop outputs.
+  input  logic        idle_req_i,      // PMU requests quiescence (synchronized)
+  output logic        idle_ack_o,      // in WFI, pipeline drained, no bus transaction
+  output logic        core_sleep_o,    // in WFI, drained, no enabled interrupt pending
+  output logic        cache_clean_o,   // D-cache holds no dirty line
+  output logic        caches_idle_o,   // both caches idle (no bus transaction); status only
 
   // AXI4-Lite master
   output logic        m_awvalid,
@@ -67,7 +78,9 @@ module cpu_top #(
   logic [31:0] daddr, dwdata, drdata;
   logic        dc_maint_req, dc_maint_inval, dc_maint_done, dc_wb_err;
   logic        ic_inval_req, ic_inval_done;
-  logic        ic_idle, dc_idle;
+  logic        ic_idle, dc_idle, dc_clean;
+  logic        core_sleep, wfi_quiet, wfi_hold;
+  logic        idle_ack_q, core_sleep_q, mux_idle;
 
   // Cache AXI ports, [0] = I-cache, [1] = D-cache
   logic [1:0]       c_awvalid, c_awready, c_wvalid, c_wready, c_bvalid, c_bready;
@@ -88,7 +101,7 @@ module cpu_top #(
     .dc_maint_done_i (dc_maint_done), .dc_wb_err_i (dc_wb_err),
     .ic_inval_req_o (ic_inval_req), .ic_inval_done_i (ic_inval_done),
     .irq_software_i, .irq_timer_i, .irq_external_i, .mtime_i,
-    .core_sleep_o,
+    .wfi_hold_i (wfi_hold), .core_sleep_o (core_sleep), .wfi_quiet_o (wfi_quiet),
     .trace_valid_o, .trace_irq_o, .trace_trap_o, .trace_pc_o, .trace_insn_o,
     .trace_next_pc_o, .trace_cause_o, .trace_tval_o, .trace_rd_we_o, .trace_rd_o,
     .trace_rd_wdata_o, .trace_mem_we_o, .trace_mem_re_o, .trace_mem_addr_o,
@@ -118,7 +131,7 @@ module cpu_top #(
     .req_i (dreq), .gnt_o (dgnt), .addr_i (daddr), .we_i (dwe), .be_i (dbe), .wdata_i (dwdata),
     .rvalid_o (drvalid), .rdata_o (drdata), .err_o (derr),
     .maint_req_i (dc_maint_req), .maint_inval_i (dc_maint_inval),
-    .maint_done_o (dc_maint_done), .wb_err_o (dc_wb_err),
+    .maint_done_o (dc_maint_done), .wb_err_o (dc_wb_err), .cache_clean_o (dc_clean),
     .m_awvalid (c_awvalid[1]), .m_awready (c_awready[1]), .m_awaddr (c_awaddr[1]), .m_awprot (c_awprot[1]),
     .m_wvalid  (c_wvalid[1]),  .m_wready  (c_wready[1]),  .m_wdata  (c_wdata[1]),  .m_wstrb  (c_wstrb[1]),
     .m_bvalid  (c_bvalid[1]),  .m_bready  (c_bready[1]),  .m_bresp  (c_bresp[1]),
@@ -136,9 +149,46 @@ module cpu_top #(
     .s_rvalid  (c_rvalid),  .s_rready  (c_rready),  .s_rdata  (c_rdata),  .s_rresp  (c_rresp),
     .m_awvalid, .m_awready, .m_awaddr, .m_awprot, .m_wvalid, .m_wready, .m_wdata, .m_wstrb,
     .m_bvalid, .m_bready, .m_bresp, .m_arvalid, .m_arready, .m_araddr, .m_arprot,
-    .m_rvalid, .m_rready, .m_rdata, .m_rresp
+    .m_rvalid, .m_rready, .m_rdata, .m_rresp,
+    .idle_o (mux_idle)
   );
 
   assign caches_idle_o = ic_idle && dc_idle;
+
+  // ---------------------------------------------------------------------------
+  // PMU idle handshake (4-phase):
+  //   idle_req 0->1 : ack once in WFI with the pipeline, fetch, both caches and
+  //                   the bus mux idle (no outstanding AXI transaction).
+  //   ack held      : while idle_req is high, even if an interrupt arrives; the
+  //                   core does not leave WFI (wfi_hold) so it stays quiescent.
+  //   idle_req 1->0 : ack drops the next cycle; WFI may then end on a wake.
+  // The PMU may gate clk_cpu or remove power only while idle_ack is high.
+  // ---------------------------------------------------------------------------
+  logic quiescent;
+  assign quiescent = wfi_quiet && ic_idle && dc_idle && mux_idle;
+  assign wfi_hold  = idle_req_i || idle_ack_q;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      idle_ack_q   <= 1'b0;
+      core_sleep_q <= 1'b0;
+    end else begin
+      idle_ack_q   <= idle_req_i && (quiescent || idle_ack_q);
+      core_sleep_q <= core_sleep && ic_idle && dc_idle && mux_idle;
+    end
+  end
+
+  assign idle_ack_o    = idle_ack_q;
+  assign core_sleep_o  = core_sleep_q;
+  assign cache_clean_o = dc_clean;
+
+`ifndef SYNTHESIS
+`ifndef VERILATOR_LINT_ONLY
+  // An acknowledged core stays in WFI with no bus activity.
+  a_ack_quiescent: assert property (@(posedge clk) disable iff (!rst_n)
+    idle_ack_q |-> quiescent && !m_arvalid && !m_awvalid && !m_wvalid)
+    else $error("idle_ack asserted while the CPU is not quiescent");
+`endif
+`endif
 
 endmodule

@@ -14,6 +14,8 @@
 //   +cov=<file>          append ISA functional-coverage counts
 //   +trace=<file>        RTL commit trace
 //   +spike_log=<file>    Spike commit log
+//   +idle_pct=<p>        % of WFI sleeps in which the PMU idle handshake is
+//                        exercised (idle_req/idle_ack, default 50)
 #include <verilated.h>
 #if VM_COVERAGE
 #include <verilated_cov.h>
@@ -101,7 +103,19 @@ int main(int argc, char** argv) {
   top->clk = 0;
   top->irq_software_i = top->irq_timer_i = top->irq_external_i = 0;
   top->mtime_i = 0;
+  top->idle_req_i = 0;
   top->eval();
+
+  // PMU idle-handshake model (doc/CPU_SOC_INTERFACE.md): request quiescence
+  // while the core sleeps, hold the request for a random time (sometimes
+  // raising an interrupt meanwhile), then withdraw it. While idle_ack is high
+  // the core must not commit, fetch or issue any AXI transaction.
+  int idle_pct = int(plus_u64("idle_pct", 50));
+  std::mt19937 idle_rng(uint32_t(seed * 104729 + 7));
+  enum { IH_OFF, IH_WAIT_ACK, IH_HOLD, IH_WAIT_DROP } ih = IH_OFF;
+  int ih_cnt = 0;
+  uint64_t idle_handshakes = 0;
+  bool prev_sleep = false;
 
   AxilPins pins{};
   uint64_t cycle = 0, retired = 0, sleep_cycles = 0, sleep_run = 0, irqs = 0, traps = 0;
@@ -122,6 +136,26 @@ int main(int argc, char** argv) {
     } else {
       sleep_run = 0;
     }
+    switch (ih) {
+      case IH_OFF:
+        if (top->core_sleep_o && !prev_sleep && int(idle_rng() % 100) < idle_pct) {
+          top->idle_req_i = 1; ih = IH_WAIT_ACK; ih_cnt = 0;
+        }
+        break;
+      case IH_WAIT_ACK:
+        if (top->idle_ack_o) { ih = IH_HOLD; ih_cnt = 4 + int(idle_rng() % 60); idle_handshakes++; }
+        else if (++ih_cnt > 64) { failed = true; fail_msg = "idle_ack not given within 64 cycles"; }
+        break;
+      case IH_HOLD:
+        if (ih_cnt == 2 && (idle_rng() & 1)) irq_src |= 1u << (idle_rng() % 3);  // wake race
+        if (--ih_cnt <= 0) { top->idle_req_i = 0; ih = IH_WAIT_DROP; ih_cnt = 0; }
+        break;
+      case IH_WAIT_DROP:
+        if (!top->idle_ack_o) ih = IH_OFF;
+        else if (++ih_cnt > 4) { failed = true; fail_msg = "idle_ack not withdrawn after idle_req"; }
+        break;
+    }
+    prev_sleep = top->core_sleep_o;
     top->irq_software_i = irq_src & 1;
     top->irq_timer_i = (irq_src >> 1) & 1;
     top->irq_external_i = (irq_src >> 2) & 1;
@@ -139,6 +173,12 @@ int main(int argc, char** argv) {
     pins.bready = top->m_bready; pins.arvalid = top->m_arvalid; pins.araddr = top->m_araddr;
     pins.rready = top->m_rready;
     mem.sample(pins);
+
+    if (top->rst_n && top->idle_ack_o &&
+        (top->trace_valid_o || top->m_arvalid || top->m_awvalid || top->m_wvalid)) {
+      failed = true;
+      fail_msg = "activity while idle_ack is asserted at cycle " + std::to_string(cycle);
+    }
 
     if (top->rst_n && top->trace_valid_o && !done) {
       TraceEvent e{};
@@ -212,6 +252,7 @@ int main(int argc, char** argv) {
   if (!cov_path.empty()) cov.write(cov_path);
   if (trace) fclose(trace);
 
+  printf("[tb] idle_handshakes=%lu\n", (unsigned long)idle_handshakes);
   printf("[tb] cycles=%lu retired=%lu traps=%lu irqs=%lu sleep_cycles=%lu axi_rd=%lu axi_wr=%lu axi_err=%lu cosim_steps=%lu\n",
          (unsigned long)cycle, (unsigned long)retired, (unsigned long)traps, (unsigned long)irqs,
          (unsigned long)sleep_cycles, (unsigned long)mem.n_reads, (unsigned long)mem.n_writes,

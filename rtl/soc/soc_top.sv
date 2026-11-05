@@ -18,7 +18,8 @@
 //   core_sleep/idle_ack/
 //   cache_clean            clk_cpu -> clk_aon   u_core_sync (levels, 4-phase)
 //   idle_req, meip/mtip/
-//   msip                   clk_aon -> clk_cpu   tech_sync inside the core
+//   msip                   clk_aon -> clk_cpu   tech_sync in pd_cpu (once, at the CPU boundary)
+//   mtime[63:0]            clk_aon -> clk_cpu   cdc_snapshot_src (here) / _dst (pd_cpu)
 //   clock-gate enable/ack  clk_aon <-> root     u_clk_rst
 //   CPU reset release/ack  clk_aon <-> root     u_clk_rst
 //   DVFS select / status   clk_aon <-> clk_op   u_dvfs_mux / u_dvfs_sync
@@ -32,7 +33,15 @@ module soc_top #(
   parameter int    RST_CLK_CYCLES = 4,
   parameter int    PSW_ON_DLY     = 8,
   parameter int    PSW_OFF_DLY    = 4,
-  parameter logic [1:0] RESET_OP  = 2'd2
+  parameter logic [1:0] RESET_OP  = 2'd2,
+  // Address map (doc/SPEC.md). The CPU's reset vector, RAM base and cacheable
+  // ranges and the AON decoder are all derived from these values.
+  parameter logic [31:0] BOOT_ADDR      = 32'h0000_0000,
+  parameter logic [31:0] ROM_BASE       = 32'h0000_0000,
+  parameter logic [31:0] ROM_MASK       = 32'hFFFF_C000,   // 16 KB, cacheable (I-side)
+  parameter logic [31:0] RAM_BASE       = 32'h1000_0000,
+  parameter logic [31:0] RAM_MASK       = 32'hFFFE_0000,   // 128 KB, cacheable
+  parameter logic [31:0] RAM_ALIAS_BASE = 32'h3000_0000    // 128 KB uncached alias of RAM
 ) (
   input  logic       clk_aon_i,
   input  logic [2:0] clk_op_i,
@@ -95,18 +104,30 @@ module soc_top #(
   logic [31:0] c_awaddr, c_wdata, c_araddr;
   logic [2:0]  c_awprot, c_arprot;
   logic [3:0]  c_wstrb;
-  logic        c_idle_ack, c_core_sleep, c_cache_clean, c_trap;
+  logic        c_idle_ack, c_core_sleep, c_cache_clean, c_mtime_req;
 
   // bridge -> PD_CPU
   logic        b_awready, b_wready, b_bvalid, b_arready, b_rvalid;
   logic [1:0]  b_bresp, b_rresp;
   logic [31:0] b_rdata;
 
-  pd_cpu u_pd_cpu (
+  // mtime export: coherent snapshot crossing (source half, PD_AON)
+  logic [63:0] mtime, mtime_snap;
+  logic        mtime_ack, i_mtime_req;
+  cdc_snapshot_src #(.W(64)) u_mtime_src (
+    .clk_i (clk_aon_i), .rst_ni (rst_aon_n), .value_i (mtime),
+    .req_tgl_i (i_mtime_req), .ack_tgl_o (mtime_ack), .snap_o (mtime_snap)
+  );
+
+  pd_cpu #(
+    .BOOT_ADDR (BOOT_ADDR), .ROM_BASE (ROM_BASE), .ROM_MASK (ROM_MASK),
+    .RAM_BASE (RAM_BASE), .RAM_MASK (RAM_MASK)
+  ) u_pd_cpu (
     .clk_i (clk_cpu), .rst_ni (cpu_rst_n),
     .meip_i (meip), .mtip_i (mtip), .msip_i (msip), .idle_req_i (idle_req),
     .idle_ack_o (c_idle_ack), .core_sleep_o (c_core_sleep),
-    .cache_clean_o (c_cache_clean), .trap_o (c_trap),
+    .cache_clean_o (c_cache_clean),
+    .mtime_snap_i (mtime_snap), .mtime_ack_i (mtime_ack), .mtime_req_o (c_mtime_req),
     .m_awvalid_o (c_awvalid), .m_awready_i (b_awready), .m_awaddr_o (c_awaddr), .m_awprot_o (c_awprot),
     .m_wvalid_o (c_wvalid), .m_wready_i (b_wready), .m_wdata_o (c_wdata), .m_wstrb_o (c_wstrb),
     .m_bvalid_i (b_bvalid), .m_bready_o (c_bready), .m_bresp_i (b_bresp),
@@ -125,11 +146,11 @@ module soc_top #(
   logic [31:0] i_awaddr, i_wdata, i_araddr;
   logic [2:0]  i_awprot, i_arprot;
   logic [3:0]  i_wstrb;
-  logic        i_idle_ack, i_core_sleep, i_cache_clean, i_trap;
+  logic        i_idle_ack, i_core_sleep, i_cache_clean;
 
   assign iso_in = {c_awvalid, c_awaddr, c_awprot, c_wvalid, c_wdata, c_wstrb, c_bready,
                    c_arvalid, c_araddr, c_arprot, c_rready,
-                   c_idle_ack, c_core_sleep, c_cache_clean, c_trap};
+                   c_idle_ack, c_core_sleep, c_cache_clean, c_mtime_req};
 
   tech_iso #(.WIDTH(ISO_W), .CLAMP('0)) u_iso (
     .iso_en_i (iso_en), .d_i (iso_in), .q_o (iso_out)
@@ -137,7 +158,7 @@ module soc_top #(
 
   assign {i_awvalid, i_awaddr, i_awprot, i_wvalid, i_wdata, i_wstrb, i_bready,
           i_arvalid, i_araddr, i_arprot, i_rready,
-          i_idle_ack, i_core_sleep, i_cache_clean, i_trap} = iso_out;
+          i_idle_ack, i_core_sleep, i_cache_clean, i_mtime_req} = iso_out;
 
   // ---------------------------------------------------------------------------
   // CPU -> AON bus crossing
@@ -181,7 +202,9 @@ module soc_top #(
   // ---------------------------------------------------------------------------
   aon_subsys #(
     .ROM_INIT (ROM_INIT), .VSETTLE_CYCLES (VSETTLE_CYCLES), .RET_CYCLES (RET_CYCLES),
-    .ISO_CYCLES (ISO_CYCLES), .RST_CLK_CYCLES (RST_CLK_CYCLES), .RESET_OP (RESET_OP)
+    .ISO_CYCLES (ISO_CYCLES), .RST_CLK_CYCLES (RST_CLK_CYCLES), .RESET_OP (RESET_OP),
+    .ROM_BASE (ROM_BASE), .ROM_MASK (ROM_MASK), .RAM_BASE (RAM_BASE), .RAM_MASK (RAM_MASK),
+    .RAM_ALIAS_BASE (RAM_ALIAS_BASE)
   ) u_aon (
     .clk_i (clk_aon_i), .rst_ni (rst_aon_n),
     .s_awvalid_i (a_awvalid), .s_awready_o (a_awready), .s_awaddr_i (a_awaddr), .s_awprot_i (a_awprot),
@@ -190,7 +213,7 @@ module soc_top #(
     .s_arvalid_i (a_arvalid), .s_arready_o (a_arready), .s_araddr_i (a_araddr), .s_arprot_i (a_arprot),
     .s_rvalid_o (a_rvalid), .s_rready_i (a_rready), .s_rdata_o (a_rdata), .s_rresp_o (a_rresp),
     .uart_rx_i (uart_rx_i), .uart_tx_o (uart_tx_o), .ext_wake_i (ext_wake_i),
-    .meip_o (meip), .mtip_o (mtip), .msip_o (msip),
+    .meip_o (meip), .mtip_o (mtip), .msip_o (msip), .mtime_o (mtime),
     .core_sleep_i (s_core_sleep), .idle_ack_i (s_idle_ack), .cache_clean_i (s_cache_clean),
     .idle_req_o (idle_req),
     .cg_en_o (cg_en), .cg_ack_i (cg_ack), .bus_idle_i (bus_idle),
@@ -201,5 +224,5 @@ module soc_top #(
   );
 
   logic unused;
-  assign unused = ^{i_trap, pd_cpu_supply_on, pmu_state};
+  assign unused = ^{pd_cpu_supply_on, pmu_state};
 endmodule

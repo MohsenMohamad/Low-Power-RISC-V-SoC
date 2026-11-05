@@ -12,6 +12,7 @@ module aon_mtimer (
   input  logic        rst_ni,
   output logic        mtip_o,
   output logic        msip_o,
+  output logic [63:0] mtime_o,       // live counter (clk_aon), exported to PD_CPU via cdc_snapshot
   input  logic        req_i,
   input  logic        we_i,
   input  logic [11:0] addr_i,
@@ -29,6 +30,7 @@ module aon_mtimer (
   assign ack_o  = req_i;
   assign mtip_o = (mtime_q >= mtimecmp_q);
   assign msip_o = msip_q;
+  assign mtime_o = mtime_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin

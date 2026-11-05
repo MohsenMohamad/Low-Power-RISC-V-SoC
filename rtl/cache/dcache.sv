@@ -10,8 +10,18 @@
 // core request is outstanding):
 //   maint_inval=0 : clean   - write back every dirty line, keep lines valid
 //   maint_inval=1 : flush   - write back dirty lines and invalidate everything
-// Write-back errors (BRESP != OKAY) are imprecise; they set wb_err_o, which is
-// cleared at the start of the next maintenance operation.
+// Write-back errors (BRESP != OKAY) are imprecise; they set wb_err_o.
+//   * A line written back by clean/flush is marked clean (and, for flush,
+//     invalid) only after all four write responses arrived without error. A
+//     line with a failed write-back stays valid and dirty, so cache_clean_o
+//     stays low and the next maintenance operation retries it.
+//   * A failed eviction write-back (data lost) is remembered in evict_err_q and
+//     reported by the next maintenance operation even though that operation
+//     starts by clearing wb_err_o.
+//   * wb_err_o at maint_done = error in this operation OR an eviction error
+//     since the previous maintenance operation.
+// cache_clean_o (registered) = no valid dirty line and no eviction write-back
+// in progress, i.e. memory holds every value written to the cache.
 module dcache #(
   parameter logic [31:0] CACHE_BASE = 32'h8000_0000,
   parameter logic [31:0] CACHE_MASK = 32'hFFFE_0000   // cacheable: (a & MASK) == BASE
@@ -34,6 +44,7 @@ module dcache #(
   input  logic        maint_inval_i,
   output logic        maint_done_o,
   output logic        wb_err_o,
+  output logic        cache_clean_o,   // no dirty lines (registered)
 
   // AXI4-Lite master
   output logic        m_awvalid,
@@ -99,6 +110,9 @@ module dcache #(
   logic             aw_done_q, w_done_q;
   logic             rf_err_q;
   logic             wb_err_q;
+  logic             evict_err_q;      // eviction write-back failed since last maintenance
+  logic             line_err_q;       // a beat of the current write-back failed
+  logic             clean_q;
   logic             fl_inval_q;
 
   // SRAM ports
@@ -164,7 +178,8 @@ module dcache #(
   assign gnt_o  = !maint_req_i && ((state_q == S_IDLE) || lookup_load_hit);
   assign accept = req_i && gnt_o;
 
-  assign wb_err_o = wb_err_q;
+  assign wb_err_o      = wb_err_q;
+  assign cache_clean_o = clean_q;
   assign idle_o   = (state_q == S_IDLE);
 
   // ---------------------------------------------------------------------------
@@ -358,6 +373,9 @@ module dcache #(
       w_done_q       <= 1'b0;
       rf_err_q       <= 1'b0;
       wb_err_q       <= 1'b0;
+      evict_err_q    <= 1'b0;
+      line_err_q     <= 1'b0;
+      clean_q        <= 1'b1;
       fl_inval_q     <= 1'b0;
       rq_addr_q      <= '0;
       rq_we_q        <= 1'b0;
@@ -379,7 +397,7 @@ module dcache #(
             line_idx_q <= '0;
             victim_q   <= 1'b0;
             fl_inval_q <= maint_inval_i;
-            wb_err_q   <= 1'b0;
+            wb_err_q   <= evict_err_q;   // lost eviction data is reported by this op
           end
         end
 
@@ -396,6 +414,7 @@ module dcache #(
             valid_q[victim_sel][rq_idx] <= 1'b0;
             dirty_q[victim_sel][rq_idx] <= 1'b0;
             wb_for_flush_q              <= 1'b0;
+            line_err_q                  <= 1'b0;
             cnt_q                       <= '0;
             rf_err_q                    <= 1'b0;
             aw_done_q                   <= 1'b0;
@@ -411,9 +430,15 @@ module dcache #(
           if (m_bvalid) begin
             aw_done_q <= 1'b0;
             w_done_q  <= 1'b0;
-            if (m_bresp[1]) wb_err_q <= 1'b1;
+            if (m_bresp[1]) begin
+              wb_err_q   <= 1'b1;
+              line_err_q <= 1'b1;
+              if (!wb_for_flush_q) evict_err_q <= 1'b1;
+            end
             cnt_q <= cnt_q + 2'd1;
-            if (cnt_q == 2'd3 && wb_for_flush_q) begin
+            // Clean only after the last write response, and only if no beat
+            // of this line failed; otherwise the line stays valid and dirty.
+            if (cnt_q == 2'd3 && wb_for_flush_q && !line_err_q && !m_bresp[1]) begin
               dirty_q[victim_q][line_idx_q] <= 1'b0;
               if (fl_inval_q) valid_q[victim_q][line_idx_q] <= 1'b0;
             end
@@ -446,6 +471,7 @@ module dcache #(
         S_FL_SCAN: begin
           if (fl_line_dirty) begin
             wb_for_flush_q <= 1'b1;
+            line_err_q     <= 1'b0;
             cnt_q          <= '0;
             aw_done_q      <= 1'b0;
             w_done_q       <= 1'b0;
@@ -461,6 +487,12 @@ module dcache #(
 
         default: ;
       endcase
+
+      if (state_q == S_FL_DONE) evict_err_q <= 1'b0;   // reported by this op
+
+      clean_q <= !(|(dirty_q[0] & valid_q[0])) && !(|(dirty_q[1] & valid_q[1])) &&
+                 !(state_q inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG}) &&
+                 !(state_d inside {S_WB_RD, S_WB_W, S_WB_B, S_FL_TAG});
 
       // After a flush write-back the scan resumes at the next way/set
       if (state_q == S_WB_B && m_bvalid && cnt_q == 2'd3 && wb_for_flush_q) begin

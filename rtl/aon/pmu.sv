@@ -29,8 +29,10 @@
 // slower), then back to IDLE and DVFS_DONE is raised (interrupt source).
 // Safety aborts: IDLE_REQ -> WAKE_REL if the core left WFI before
 // acknowledging; BUS_DRAIN -> IDLE (STATUS.ERR_DIRTY, the power-down is
-// refused and the core stays clock gated until the wake event) if the core
-// reports dirty caches at power-down.
+// refused and the core stays clock gated until the wake event) unless the
+// core reports both idle_ack and cache_clean (no dirty D-cache line) at
+// power-down (doc/SPEC.md: PD_CPU is powered down only while idle_ack and
+// cache_clean are both asserted).
 //
 // Register map (offsets):
 //   0x00 CTRL       RW  [1:0] MODE, [8] LP_EN
@@ -192,7 +194,7 @@ module pmu #(
       ST_DVFS_VDN:
         if (!vwait_q || cnt_q >= 16'(VSETTLE_CYCLES)) state_d = ST_IDLE;
       ST_BUS_DRAIN:
-        if (!cache_clean_i)  state_d = ST_IDLE;   // refuse power-down: stay clock gated
+        if (!cache_clean_i || !idle_ack_i) state_d = ST_IDLE;   // refuse power-down: stay clock gated
         else if (bus_idle_i) state_d = ST_ISO_ON;
       ST_ISO_ON:
         if (cnt_q >= 16'(ISO_CYCLES) && !cpu_rst_ack_i) state_d = ST_PWR_OFF;
@@ -404,9 +406,12 @@ module pmu #(
                   iso_en_q != $past(iso_en_q), !cg_en_q && !$past(cg_en_q))
   // The clock only runs while isolated if the core is held in reset.
   `SVA_ASSERT_IMP(a_clk_iso_only_in_reset, clk_i, rst_ni, cg_en_q && iso_en_q, !cpu_rst_n_q && pwr_sw_en_q)
-  // Isolation is only applied once the bus is idle (no transaction can be cut).
+  // Isolation (and with it the power-down) is only applied once the bus is
+  // idle (no transaction can be cut), the core acknowledged idle and the
+  // D-cache holds no dirty line.
   `SVA_ASSERT_IMP(a_iso_on_bus_idle, clk_i, rst_ni,
-                  iso_en_q && !$past(iso_en_q), $past(bus_idle_i) && $past(cache_clean_i))
+                  iso_en_q && !$past(iso_en_q),
+                  $past(bus_idle_i) && $past(cache_clean_i) && $past(idle_ack_i))
   // The switch only turns off with the clock gated and the core in reset.
   `SVA_ASSERT_IMP(a_pwr_off_gated, clk_i, rst_ni,
                   !pwr_sw_en_q && $past(pwr_sw_en_q), !cg_en_q && !$past(cpu_rst_ack_i))

@@ -131,7 +131,8 @@ module tb_axil_mux;
     .m_wvalid  (m.wvalid),  .m_wready  (m.wready),  .m_wdata  (m.wdata),  .m_wstrb  (m.wstrb),
     .m_bvalid  (m.bvalid),  .m_bready  (m.bready),  .m_bresp  (m.bresp),
     .m_arvalid (m.arvalid), .m_arready (m.arready), .m_araddr (m.araddr), .m_arprot (m.arprot),
-    .m_rvalid  (m.rvalid),  .m_rready  (m.rready),  .m_rdata  (m.rdata),  .m_rresp  (m.rresp)
+    .m_rvalid  (m.rvalid),  .m_rready  (m.rready),  .m_rdata  (m.rdata),  .m_rresp  (m.rresp),
+    .idle_o    ()
   );
 
   // SVA on the downstream (master) side and per-port response routing

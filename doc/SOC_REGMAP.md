@@ -6,7 +6,7 @@ Source of truth: the RTL in `rtl/aon/`. The C definitions are in
 registers take full-word writes only. A partial write (`wstrb != 0xF`) to a
 register that requires full words, a write to a read-only register, or an
 access to an unmapped offset returns SLVERR, and the register keeps its value.
-An access to an unmapped address region returns DECERR.
+An access to an unmapped address region returns SLVERR (doc/SPEC.md).
 
 Access types: RW = read/write, RO = read-only, W1C = write 1 to clear,
 WO = write-only.
@@ -22,6 +22,20 @@ WO = write-only.
 | `0x2000_2000` | 4 KB   | Interrupt controller                     |
 | `0x2000_3000` | 4 KB   | PMU                                      |
 | `0x2000_4000` | 4 KB   | Wake timer                               |
+| `0x2000_8000` | 32 KB  | Debug blocks (doc/DEBUG_SPEC.md; not implemented yet: SLVERR) |
+| `0x3000_0000` | 128 KB | Main RAM, uncached alias                 |
+
+The CPU caches the boot ROM (I-side) and the main RAM window
+`0x1000_0000`-`0x1001_FFFF` (I- and D-side); nothing else is cacheable.
+
+The uncached alias `0x3000_0000`-`0x3001_FFFF` maps to the same physical RAM
+as `0x1000_0000`: offset `x` in the alias is offset `x` in the RAM. Accesses
+through the alias bypass the D-cache, so they see memory, not dirty cache
+lines. Use it for state shared with the host or kept across reboots. Before
+reading through the alias data that was written through the cached window,
+clean the D-cache (`mcachectl`); after writing through the alias, flush
+(clean + invalidate) the D-cache before reading the same data through the
+cached window. RAM retention rules apply to both windows.
 
 ROM writes return SLVERR. RAM accesses while the RAM is in retention return
 SLVERR. This cannot happen from the CPU, which is powered off whenever the RAM
@@ -121,7 +135,7 @@ STATUS fields:
 | [16]  | RESUME      | W1C  | CPU was powered up from SLEEP or DEEP_SLEEP |
 | [17]  | RESUME_DEEP | W1C  | ... and the power-down was DEEP_SLEEP |
 | [18]  | DVFS_DONE   | W1C  | A DVFS sequence completed |
-| [19]  | ERR_DIRTY   | W1C  | A power-down was refused because the D-cache reported dirty lines; the CPU was kept in IDLE instead |
+| [19]  | ERR_DIRTY   | W1C  | A power-down was refused because the CPU did not report both `cache_clean` (no dirty D-cache line) and `idle_ack`; the CPU was kept in IDLE instead |
 
 PMU FSM state encoding: 0 RUN, 1 IDLE_REQ, 2 CLK_GATE, 3 IDLE, 4 DVFS_VUP,
 5 DVFS_SWITCH, 6 DVFS_VDN, 7 BUS_DRAIN, 8 ISO_ON, 9 PWR_OFF, 10 OFF,
@@ -135,9 +149,13 @@ to a faster clock, and lowers it after it switches to a slower one.
 ### Low-power entry (firmware view)
 
 1. Set CTRL.MODE (and DVFS.TARGET_OP if a change is wanted).
-2. For SLEEP / DEEP_SLEEP, save the context to RAM, write SCRATCH0/1 and clean
-   the D-cache (in-house core).
-3. Execute `wfi`.
+2. Enable in `mie` every interrupt used as a wake source (MEIE for interrupt
+   controller sources, MTIE, MSIE). WFI ends only on an interrupt that is
+   pending and enabled in `mie` (`mstatus.MIE` may stay 0).
+3. For SLEEP / DEEP_SLEEP, save the context to RAM, write SCRATCH0/1 and clean
+   the D-cache (`mcachectl` bit 2), and check that `mcachectl` bit 31 (write-back
+   error) reads 0. No cached store may follow the clean.
+4. Execute `wfi`.
 
 From IDLE, execution continues after `wfi`. From SLEEP or DEEP_SLEEP, the CPU
 restarts at the boot ROM with STATUS.RESUME set. A wake event already pending at

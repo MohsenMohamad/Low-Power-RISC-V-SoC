@@ -3,14 +3,15 @@
 //
 // One write and one read transaction in flight at a time (sufficient for the
 // single in-order CPU master). Slave i is selected when
-// (addr & MASK[i]) == BASE[i]; unmapped addresses get a DECERR response from
+// (addr & MASK[i]) == BASE[i]; unmapped addresses get an UNMAPPED_RESP response (SLVERR by default, doc/SPEC.md) from
 // the internal error slave.
 // -----------------------------------------------------------------------------
 `include "sva_macros.svh"
 module axil_demux #(
   parameter int              N    = 2,
   parameter logic [N*32-1:0] BASE = '0,
-  parameter logic [N*32-1:0] MASK = '0
+  parameter logic [N*32-1:0] MASK = '0,
+  parameter logic [1:0]      UNMAPPED_RESP = 2'b10   // SLVERR (doc/SPEC.md: unmapped -> SLVERR)
 ) (
   input  logic          clk_i,
   input  logic          rst_ni,
@@ -55,7 +56,7 @@ module axil_demux #(
   input  logic [N*32-1:0] m_rdata_i,
   input  logic [N*2-1:0]  m_rresp_i
 );
-  localparam logic [1:0] RESP_DECERR = 2'b11;
+  localparam logic [1:0] RESP_UNMAPPED = UNMAPPED_RESP;
 
   function automatic logic [N:0] decode(input logic [31:0] addr);
     logic [N:0] sel;
@@ -137,7 +138,7 @@ module axil_demux #(
         end
         W_ISSUE: begin
           if (wsel_q[N]) begin
-            bresp_q  <= RESP_DECERR;
+            bresp_q  <= RESP_UNMAPPED;
             bvalid_q <= 1'b1;
             wstate_q <= W_RESP;
           end else begin
@@ -213,7 +214,7 @@ module axil_demux #(
         R_ISSUE: begin
           if (rsel_q[N]) begin
             rdata_q  <= '0;
-            rresp_q  <= RESP_DECERR;
+            rresp_q  <= RESP_UNMAPPED;
             rvalid_q <= 1'b1;
             rstate_q <= R_RESP;
           end else if (|(m_arvalid_o & m_arready_i)) begin

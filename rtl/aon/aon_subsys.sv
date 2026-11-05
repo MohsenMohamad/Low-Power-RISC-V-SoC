@@ -1,7 +1,8 @@
 // -----------------------------------------------------------------------------
 // aon_subsys - always-on subsystem (PD_AON, clk_aon)
 //
-// AXI4-Lite interconnect and all always-on slaves:
+// AXI4-Lite interconnect and all always-on slaves (doc/SPEC.md address map;
+// bases of ROM / RAM / RAM alias are parameters set by soc_top):
 //   0x0000_0000  boot ROM      16 KB
 //   0x1000_0000  main RAM     128 KB (retention capable)
 //   0x2000_0000  UART
@@ -9,6 +10,12 @@
 //   0x2000_2000  interrupt controller
 //   0x2000_3000  PMU
 //   0x2000_4000  wake timer
+//   0x2000_8000  debug blocks (32 KB; reserved, not implemented in stage 1 -> SLVERR)
+//   0x3000_0000  RAM uncached alias 128 KB: same physical RAM as 0x1000_0000.
+//                Not cacheable in the CPU (outside the D-cache window), so
+//                accesses bypass the D-cache. The alias is folded onto the RAM
+//                window before the interconnect decode.
+// Unmapped addresses return SLVERR.
 // Interrupt controller sources:
 //   0 UART, 1 wake timer, 2 PMU (DVFS done), 3 external wake pin, 7:4 spare
 // -----------------------------------------------------------------------------
@@ -18,7 +25,12 @@ module aon_subsys #(
   parameter int    RET_CYCLES     = 4,
   parameter int    ISO_CYCLES     = 2,
   parameter int    RST_CLK_CYCLES = 4,
-  parameter logic [1:0] RESET_OP  = 2'd2
+  parameter logic [1:0] RESET_OP  = 2'd2,
+  parameter logic [31:0] ROM_BASE       = 32'h0000_0000,
+  parameter logic [31:0] ROM_MASK       = 32'hFFFF_C000,
+  parameter logic [31:0] RAM_BASE       = 32'h1000_0000,
+  parameter logic [31:0] RAM_MASK       = 32'hFFFE_0000,
+  parameter logic [31:0] RAM_ALIAS_BASE = 32'h3000_0000
 ) (
   input  logic        clk_i,
   input  logic        rst_ni,
@@ -50,6 +62,7 @@ module aon_subsys #(
   output logic        meip_o,
   output logic        mtip_o,
   output logic        msip_o,
+  output logic [63:0] mtime_o,
   // PMU <-> PD_CPU control (already synchronized / isolated)
   input  logic        core_sleep_i,
   input  logic        idle_ack_i,
@@ -72,10 +85,21 @@ module aon_subsys #(
   localparam int RAW = 17;
   localparam logic [NS*32-1:0] BASE = {
     32'h2000_4000, 32'h2000_3000, 32'h2000_2000, 32'h2000_1000,
-    32'h2000_0000, 32'h1000_0000, 32'h0000_0000};
+    32'h2000_0000, RAM_BASE, ROM_BASE};
   localparam logic [NS*32-1:0] MASK = {
     32'hFFFF_F000, 32'hFFFF_F000, 32'hFFFF_F000, 32'hFFFF_F000,
-    32'hFFFF_F000, 32'hFFFE_0000, 32'hFFFF_C000};
+    32'hFFFF_F000, RAM_MASK, ROM_MASK};
+
+  // ---------------- RAM uncached alias ----------------
+  // An address in the alias window is replaced by the same offset in the RAM
+  // window; the decoder then routes it to the one physical RAM.
+  function automatic logic [31:0] fold_alias(input logic [31:0] a);
+    if ((a & RAM_MASK) == RAM_ALIAS_BASE) return RAM_BASE | (a & ~RAM_MASK);
+    return a;
+  endfunction
+  logic [31:0] x_awaddr, x_araddr;
+  assign x_awaddr = fold_alias(s_awaddr_i);
+  assign x_araddr = fold_alias(s_araddr_i);
 
   localparam int S_ROM = 0, S_RAM = 1, S_UART = 2, S_MTIMER = 3,
                  S_INTC = 4, S_PMU = 5, S_WTIMER = 6;
@@ -91,10 +115,10 @@ module aon_subsys #(
 
   axil_demux #(.N(NS), .BASE(BASE), .MASK(MASK)) u_xbar (
     .clk_i, .rst_ni,
-    .s_awvalid_i, .s_awready_o, .s_awaddr_i, .s_awprot_i,
+    .s_awvalid_i, .s_awready_o, .s_awaddr_i (x_awaddr), .s_awprot_i,
     .s_wvalid_i, .s_wready_o, .s_wdata_i, .s_wstrb_i,
     .s_bvalid_o, .s_bready_i, .s_bresp_o,
-    .s_arvalid_i, .s_arready_o, .s_araddr_i, .s_arprot_i,
+    .s_arvalid_i, .s_arready_o, .s_araddr_i (x_araddr), .s_arprot_i,
     .s_rvalid_o, .s_rready_i, .s_rdata_o, .s_rresp_o,
     .m_awvalid_o (m_awvalid), .m_awready_i (m_awready), .m_awaddr_o (m_awaddr), .m_awprot_o (m_awprot),
     .m_wvalid_o (m_wvalid), .m_wready_i (m_wready), .m_wdata_o (m_wdata), .m_wstrb_o (m_wstrb),
@@ -156,7 +180,7 @@ module aon_subsys #(
   );
 
   aon_mtimer u_mtimer (
-    .clk_i, .rst_ni, .mtip_o, .msip_o,
+    .clk_i, .rst_ni, .mtip_o, .msip_o, .mtime_o,
     .req_i (req[S_MTIMER]), .we_i (we[S_MTIMER]), .addr_i (addr[S_MTIMER][11:0]),
     .wdata_i (wdata[S_MTIMER]), .wstrb_i (wstrb[S_MTIMER]),
     .ack_o (ack[S_MTIMER]), .rdata_o (rdata[S_MTIMER]), .err_o (err[S_MTIMER])

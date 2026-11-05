@@ -1,9 +1,9 @@
 `verilator_config
-// Third-party stand-in core: not linted (it will be replaced by the in-house core).
-lint_off -file "*third_party/picorv32/*"
-lint_off -rule DECLFILENAME -file "*third_party/*"
-// PicoRV32 samples its reset synchronously while the rest of the design uses
-// asynchronous-assert/synchronous-deassert resets; the reset comes from a
-// reset synchronizer so both usages are safe.
-lint_off -rule SYNCASYNCNET -file "*rtl/soc/soc_top.sv" -match "*cpu_rst_n*"
-lint_off -rule SYNCASYNCNET -file "*rtl/tech/tech_sync.sv" -match "*u_cpu_rst*"
+// All RTL is linted with -Wall. No third-party code is part of the design.
+//
+// Reset synchronizers (rst_sync -> tech_sync): the last stage of the chain is
+// the synchronized reset (used asynchronously by the flops it resets) and the
+// earlier stages feed it as data. Verilator reports the stage array as one
+// signal used both ways; this is the intended async-assert/sync-release
+// structure. Waived for the stage array of the synchronizer cell only.
+lint_off -rule SYNCASYNCNET -file "*rtl/tech/tech_sync.sv" -match "*stage_q*"

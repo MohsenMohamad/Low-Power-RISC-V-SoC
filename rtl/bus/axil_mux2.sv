@@ -48,7 +48,9 @@ module axil_mux2 (
   input  logic        m_rvalid,
   output logic        m_rready,
   input  logic [31:0] m_rdata,
-  input  logic [1:0]  m_rresp
+  input  logic [1:0]  m_rresp,
+
+  output logic        idle_o      // no transaction owned on either path
 );
 
   typedef enum logic [1:0] { P_IDLE, P_ADDR, P_RESP } path_e;
@@ -140,5 +142,7 @@ module axil_mux2 (
     s_bvalid[wr_own_q]  = (wr_q == P_RESP) && m_bvalid;
     for (int i = 0; i < 2; i++) s_bresp[i] = m_bresp;
   end
+
+  assign idle_o = (rd_q == P_IDLE) && (wr_q == P_IDLE);
 
 endmodule

@@ -51,7 +51,9 @@ module core_top
   input  logic [63:0] mtime_i,
 
   // Power management
-  output logic        core_sleep_o,      // in WFI, pipeline and fetch idle
+  input  logic        wfi_hold_i,        // PMU idle handshake active: stay in WFI
+  output logic        core_sleep_o,      // in WFI, pipeline and fetch idle, no wake pending
+  output logic        wfi_quiet_o,       // in WFI, pipeline and fetch idle (wake may be pending)
 
   // Commit trace (verification only; unused bits are optimised away)
   output logic        trace_valid_o,
@@ -457,8 +459,13 @@ module core_top
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n)                              wfi_sleep_q <= 1'b0;
     else if (wb_retire && wb_ctrl.is_wfi)    wfi_sleep_q <= 1'b1;
-    else if (irq_wake)                       wfi_sleep_q <= 1'b0;
+    // While the PMU idle handshake is active (idle_req high or idle_ack still
+    // asserted) the core must not leave WFI: the PMU may be gating the clock
+    // or removing power (doc/CPU_SOC_INTERFACE.md, idle handshake).
+    else if (irq_wake && !wfi_hold_i)        wfi_sleep_q <= 1'b0;
   end
+
+  assign wfi_quiet_o  = wfi_sleep_q && f_idle && !ex_valid && !mem_valid && !wb_valid;
 
   assign core_sleep_o = wfi_sleep_q && !irq_wake && f_idle &&
                         !ex_valid && !mem_valid && !wb_valid;
