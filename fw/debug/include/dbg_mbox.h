@@ -31,6 +31,7 @@ typedef struct {
 #define DBG_T_CRASH_ILLEGAL 3u
 #define DBG_T_CRASH_MISALIGN 4u
 #define DBG_T_HANG          5u
+#define DBG_T_DIVTEST       6u
 
 /* Integration-testbench extension of the simulation control device. */
 #define SIMCTRL_SEED        0x10u

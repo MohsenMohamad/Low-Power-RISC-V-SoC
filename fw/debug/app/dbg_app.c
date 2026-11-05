@@ -340,6 +340,49 @@ static int drv_test(void)
     return t_fail ? -1 : 0;
 }
 
+/* ================= divergence-check kernel ================= */
+/* Pure RV32IM instruction stream (no I/O, no platform-dependent data), so
+ * Spike started at dbg_div_kernel executes exactly what the DUT retired.
+ * a0 = trace CTRL address: the kernel ends by freezing the trace, followed
+ * by nops that cover the freeze latency. tools/dbg_decode.py --spike-log
+ * compares the dumped trace with the Spike commit log. */
+__asm__(
+    "  .section .text.dbg_div, \"ax\"\n"
+    "  .globl dbg_div_kernel\n"
+    "dbg_div_kernel:\n"
+    "  li   t0, 0x12345678\n"
+    "  li   t1, 0\n"
+    "  li   t2, 40\n"
+    "1:\n"
+    "  mul  t3, t0, t0\n"
+    "  xor  t0, t0, t3\n"
+    "  srli t3, t0, 7\n"
+    "  add  t1, t1, t3\n"
+    "  divu t4, t1, t2\n"
+    "  remu t5, t0, t2\n"
+    "  add  t0, t0, t4\n"
+    "  addi t2, t2, -1\n"
+    "  bnez t2, 1b\n"
+    "  li   t6, 4\n"
+    "  sw   t6, 0(a0)\n"
+    "  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n"
+    "  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n"
+    "  ret\n"
+    "  .text\n");
+void dbg_div_kernel(uint32_t trace_ctrl_addr);
+
+static int div_test(void)
+{
+    uint32_t s = arch_irq_save();
+    dbg_trace_cfg_t c = {TRC_TRIG_NONE, TRC_TRIG_NONE, 0, 0, 0xFFFFFFFFu, 0};
+    dbg_trace_setup(&c);
+    dbg_div_kernel(DBG_TRACE_BASE + TRC_CTRL);
+    arch_irq_restore(s);
+    printf_("DIVTEST kernel=0x%08x\n", (unsigned)(uintptr_t)dbg_div_kernel);
+    dbg_crash_dump("request", 0);
+    return 0;
+}
+
 /* ================= run control ================= */
 static void crash_after(int is_exc)
 {
@@ -377,6 +420,7 @@ static int run_test(uint32_t test, uint32_t seed, uint32_t iters, uint32_t flags
     case DBG_T_DRV:      r = drv_test(); break;
     case DBG_T_CRASH_ILLEGAL:  inject(0); r = -1; break;
     case DBG_T_CRASH_MISALIGN: inject(1); r = -1; break;
+    case DBG_T_DIVTEST:  r = div_test(); break;
     case DBG_T_HANG:
         dbg_wdt_start(60000u, 0, WDT_CTRL_RST_EN);
         inject(3); r = -1; break;
@@ -416,7 +460,7 @@ static int cmd_exit(int argc, char **argv)
 
 static const mon_cmd_t dbg_cmds[] = {
     {"dbg",    "",                       "dump debug state",           cmd_dbg},
-    {"dbgrun", "<t> <seed> [it] [fl]",   "1 stress 2 drv 3 ill 4 mis 5 hang", cmd_dbgrun},
+    {"dbgrun", "<t> <seed> [it] [fl]",   "1 stress 2 drv 3 ill 4 mis 5 hang 6 div", cmd_dbgrun},
     {"exit",   "[code]",                 "end simulation",             cmd_exit},
 };
 

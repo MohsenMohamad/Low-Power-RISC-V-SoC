@@ -20,7 +20,7 @@ COMMON  := common/dbg_axil_if.sv common/dbg_axil_sva.sv common/dbg_tb_pkg.sv
 TBS     := trace evcnt errlog wdt subsys
 TESTS   := trace_rand trace_pwroff evcnt_rand evcnt_pwr errlog_rand wdt_rand wdt_lock subsys_smoke subsys_wdt_chain
 # integration preview (PicoRV32 SoC + debug blocks, firmware fw/debug)
-INTEG_TESTS := integ_drv integ_stress integ_crash_illegal integ_crash_misalign integ_hang
+INTEG_TESTS := integ_drv integ_stress integ_crash_illegal integ_crash_misalign integ_hang integ_divtest
 
 VFLAGS  := --binary --timing --assert --coverage-line --coverage-user --coverage-toggle \
            -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD -Wno-IMPLICITSTATIC \
@@ -75,7 +75,8 @@ integ_args = $(strip \
   $(if $(filter integ_stress,$(1)),+test=1 +iters=$(ITER) +flags=$(or $(FLAGS),0)) \
   $(if $(filter integ_crash_illegal,$(1)),+test=3) \
   $(if $(filter integ_crash_misalign,$(1)),+test=4) \
-  $(if $(filter integ_hang,$(1)),+test=5))
+  $(if $(filter integ_hang,$(1)),+test=5) \
+  $(if $(filter integ_divtest,$(1)),+test=6))
 
 TB_OF = $(firstword $(subst _, ,$(1)))
 

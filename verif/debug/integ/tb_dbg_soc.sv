@@ -86,6 +86,9 @@ module tb_dbg_soc;
 
   // CPU-side observation (testbench taps, isolated while PD_CPU is isolated)
   wire         iso = dut.iso_en;
+  bit          corrupt_en = 1'b0;
+  logic [31:0] corrupt_pc = '0;
+  initial corrupt_en = $value$plusargs("tap_corrupt_pc=%h", corrupt_pc);
   logic        ret_valid, trap_valid, irq_active_q;
   logic [31:0] ret_pc, ret_insn, trap_cause, trap_pc;
   always_comb begin
@@ -93,6 +96,9 @@ module tb_dbg_soc;
                 dut.u_pd_cpu.u_core.launch_next_insn;
     ret_pc    = iso ? 32'd0 : dut.u_pd_cpu.u_core.dbg_insn_addr;
     ret_insn  = iso ? 32'd0 : dut.u_pd_cpu.u_core.dbg_insn_opcode;
+    // fault injection for the divergence-check demo: corrupt the
+    // instruction reported for one PC (+tap_corrupt_pc=<hex>)
+    if (corrupt_en && ret_pc == corrupt_pc) ret_insn = ret_insn ^ 32'h0010_0000;
   end
   // PicoRV32 IRQ entry -> trap port: eoi (pending bits being served) is set
   // one IRQ-entry step after irq_active, so the trap is reported when eoi
