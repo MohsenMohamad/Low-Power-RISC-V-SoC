@@ -1,5 +1,5 @@
-/* PMU driver: power-state requests, wake sources, reset cause, counters.
- * The power-state sequencing itself lives in pm/pm.c. */
+/* PMU driver (doc/SOC_REGMAP.md 0x2000_3000). Register access only; the
+ * power-state sequences are in pm/pm.c. */
 #include "drivers.h"
 
 #define PMU(off) REG32(PMU_BASE + (off))
@@ -14,24 +14,19 @@ void pmu_write(uint32_t off, uint32_t v)
     PMU(off) = v;
 }
 
-int pmu_present(void)
+void pmu_set_mode(uint32_t mode)
 {
-    return PMU(PMU_ID) == PMU_ID_VALUE;
+    PMU(PMU_CTRL) = (mode & 3u) | PMU_CTRL_LP_EN;
 }
 
-uint32_t pmu_rst_cause(void)
+uint32_t pmu_status(void)
 {
-    return PMU(PMU_RST_CAUSE);
+    return PMU(PMU_STATUS);
 }
 
-void pmu_set_mode(uint32_t mode, int dvfs_req)
+void pmu_clear_status(uint32_t w1c)
 {
-    PMU(PMU_CTRL) = (mode & 3u) | (dvfs_req ? PMU_CTRL_DVFS_REQ : 0u);
-}
-
-void pmu_set_wake(uint32_t mask)
-{
-    PMU(PMU_WAKE_EN) = mask;
+    PMU(PMU_STATUS) = w1c & PMU_ST_W1C_ALL;
 }
 
 uint32_t pmu_cur_op(void)
@@ -39,20 +34,12 @@ uint32_t pmu_cur_op(void)
     return PMU_ST_CUR_OP(PMU(PMU_STATUS));
 }
 
-void pmu_clear_counters(void)
+uint32_t pmu_sleep_count(void)
 {
-    PMU(PMU_CNT_IDLE)  = 0;
-    PMU(PMU_CNT_SLEEP) = 0;
-    PMU(PMU_CNT_DEEP)  = 0;
-    PMU(PMU_CNT_DVFS)  = 0;
-    PMU(PMU_CNT_ABORT) = 0;
+    return PMU(PMU_SLEEP_CNT);
 }
 
-void pmu_sw_reset(void)
+uint32_t pmu_wake_cause(void)
 {
-    /* dirty cache lines would be discarded by the boot ROM */
-    dcache_flush_all();
-    uart_flush();
-    PMU(PMU_SWRST) = PMU_SWRST_KEY;
-    for (;;) ;
+    return PMU(PMU_WAKE_CAUSE);
 }

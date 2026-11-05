@@ -1,9 +1,16 @@
-/* Validation: interrupts (timer, software, external via intc), masking, WFI. */
+/* Validation: interrupts (machine timer, software, external through the
+ * interrupt controller), masking, WFI.
+ *
+ * Interrupt controller (doc/SOC_REGMAP.md, audit B06/W14): level-sensitive
+ * sources cleared at their origin (0 UART, 1 wake timer, 2 PMU DVFS_DONE,
+ * 3 external wake pin); no software-pending or claim register, so external
+ * interrupts are raised with real sources (UART TX-idle, wake timer). */
 #include "test.h"
 #include "arch.h"
 #include "trap.h"
 #include "drivers.h"
 #include "platform_api.h"
+#include "pm.h"
 
 #define WAIT_TICKS 20000u
 
@@ -26,13 +33,16 @@ static void msi_handler(trap_frame_t *f)
     timer_set_msip(0);
 }
 
+/* Clears each source at its origin. */
 static void mei_handler(trap_frame_t *f)
 {
     (void)f;
     int id = intc_claim();
     if (mei_count < 8) mei_order[mei_count] = id;
     mei_count = mei_count + 1;
-    if (id >= 0) intc_soft_clr(1u << id);
+    if (id == INTC_SRC_UART) uart_set_ie(0);
+    else if (id == INTC_SRC_WTIMER) wtimer_stop();
+    else intc_set_enabled(0);                /* unexpected source: no storm */
 }
 
 static int wait_flag(volatile uint32_t *flag, uint32_t want)
@@ -113,53 +123,69 @@ static int t_ext_irq(void)
 {
     trap_set_irq_handler(IRQ_MEI, mei_handler);
     mei_count = 0;
-    intc_set_enabled(1u << 5);
+    intc_set_enabled(IRQ_WTIMER);
     arch_irq_enable(IRQ_MEI);
     arch_irq_global_enable();
-    intc_soft_set(1u << 5);
+    wtimer_start(200, 0);
     int ok = wait_flag(&mei_count, 1);
+    timer_delay(100);
     irq_off();
     intc_set_enabled(0);
     CHECK(ok);
-    CHECK_EQ(mei_count, 1);
-    CHECK_EQ(mei_order[0], 5);
-    CHECK_EQ(intc_pending() & (1u << 5), 0);
+    CHECK_EQ(mei_count, 1);                  /* level source cleared once */
+    CHECK_EQ(mei_order[0], INTC_SRC_WTIMER);
+    CHECK_EQ(intc_pending() & IRQ_WTIMER, 0);
     return TEST_PASS;
 }
-TEST(23, "irq_external_intc", CAP_INTC, t_ext_irq);
+TEST(23, "irq_external_intc", CAP_INTC | CAP_WTIMER, t_ext_irq);
 
 static int t_intc_priority(void)
 {
     trap_set_irq_handler(IRQ_MEI, mei_handler);
     mei_count = 0;
-    /* raise three sources while masked; source 7 is not enabled */
-    intc_soft_set((1u << 6) | (1u << 3) | (1u << 7));
-    intc_set_enabled((1u << 6) | (1u << 3));
-    CHECK_EQ(intc_pending() & 0xC8u, 0xC8u);
-    CHECK_EQ(intc_claim(), 3);               /* lowest enabled index first */
+    /* raise two sources while masked: wake timer expired, UART TX idle */
+    uart_flush();
+    wtimer_start(10, 0);
+    timer_delay(40);
+    uart_set_ie(UART_CTRL_TX_IE);
+    CHECK_EQ(intc_pending() & (IRQ_UART | IRQ_WTIMER), IRQ_UART | IRQ_WTIMER);
+    CHECK_EQ(intc_active(), 0);              /* nothing enabled */
+    CHECK_EQ(intc_claim(), -1);
+    intc_set_enabled(IRQ_UART | IRQ_WTIMER);
+    CHECK_EQ(intc_active(), IRQ_UART | IRQ_WTIMER);
+    CHECK_EQ(intc_claim(), INTC_SRC_UART);   /* lowest active source first */
     arch_irq_enable(IRQ_MEI);
     arch_irq_global_enable();
     int ok = wait_flag(&mei_count, 2);
     timer_delay(200);
     irq_off();
+    intc_set_enabled(0);
     CHECK(ok);
     CHECK_EQ(mei_count, 2);
-    CHECK_EQ(mei_order[0], 3);
-    CHECK_EQ(mei_order[1], 6);
-    CHECK_EQ(intc_pending() & 0xFFu, 1u << 7); /* disabled source still pending */
-    CHECK_EQ(intc_claim(), -1);
-    intc_soft_clr(1u << 7);
+    CHECK_EQ(mei_order[0], INTC_SRC_UART);
+    CHECK_EQ(mei_order[1], INTC_SRC_WTIMER);
+    /* a disabled source stays pending and does not interrupt */
+    wtimer_start(10, 0);
+    intc_set_enabled(IRQ_UART);
+    uart_set_ie(0);
+    arch_irq_enable(IRQ_MEI);
+    arch_irq_global_enable();
+    timer_delay(100);
+    irq_off();
+    CHECK_EQ(mei_count, 2);
+    CHECK(intc_pending() & IRQ_WTIMER);
+    CHECK_EQ(intc_active(), 0);
+    wtimer_stop();
     intc_set_enabled(0);
-    CHECK_EQ(intc_pending() & 0xFCu, 0);
+    CHECK_EQ(intc_pending() & (IRQ_UART | IRQ_WTIMER | IRQ_PMU), 0);
     return TEST_PASS;
 }
-TEST(24, "irq_intc_priority_mask", CAP_INTC, t_intc_priority);
+TEST(24, "irq_intc_priority_mask", CAP_INTC | CAP_WTIMER | CAP_UART, t_intc_priority);
 
 static int t_wfi_wake(void)
 {
     /* WFI with the source enabled but interrupts globally disabled must
      * resume execution without taking the interrupt */
-    uint32_t idle0 = (suite_caps() & CAP_PMU) ? pmu_read(PMU_CNT_IDLE) : 0;
     trap_set_irq_handler(IRQ_MTI, mti_handler);
     mti_count = 0;
     irq_off();
@@ -167,7 +193,7 @@ static int t_wfi_wake(void)
     uint64_t due = timer_now() + 400;
     timer_set_cmp(due);
     int n = 0;
-    while (timer_now() < due && n < 1000) { arch_wfi(); n++; }
+    while (timer_now() < due && n < 1000) { pm_wfi(); n++; }
     uint64_t t = timer_now();
     timer_cancel();
     arch_irq_disable(IRQ_MTI);
@@ -175,7 +201,6 @@ static int t_wfi_wake(void)
     CHECK_EQ(mti_count, 0);
     if (suite_caps() & CAP_PMU) {
         CHECK_EQ(n, 1);                      /* one WFI covered the whole wait */
-        CHECK(pmu_read(PMU_CNT_IDLE) == idle0 + 1);
     }
     return TEST_PASS;
 }

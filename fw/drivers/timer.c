@@ -1,46 +1,47 @@
-/* Machine timer driver (CLINT register layout; also the SoC wake timer). */
+/* Machine timer driver: mtime / mtimecmp / msip. Register offsets come from
+ * the platform (lpsoc: doc/SOC_REGMAP.md layout; Spike: CLINT layout). */
 #include "drivers.h"
 
-#define CLINT(off) REG32(CLINT_BASE + (off))
+#define TMR(off) REG32(TIMER_BASE + (off))
 
 uint64_t timer_now(void)
 {
     uint32_t hi, lo, hi2;
     do {
-        hi  = CLINT(CLINT_MTIME + 4);
-        lo  = CLINT(CLINT_MTIME);
-        hi2 = CLINT(CLINT_MTIME + 4);
+        hi  = TMR(TIMER_MTIME + 4);
+        lo  = TMR(TIMER_MTIME);
+        hi2 = TMR(TIMER_MTIME + 4);
     } while (hi != hi2);
     return ((uint64_t)hi << 32) | lo;
 }
 
 void timer_set_cmp(uint64_t t)
 {
-    /* never let the intermediate value be smaller than both old and new */
-    CLINT(CLINT_MTIMECMP + 4) = 0xFFFFFFFFu;
-    CLINT(CLINT_MTIMECMP)     = (uint32_t)t;
-    CLINT(CLINT_MTIMECMP + 4) = (uint32_t)(t >> 32);
+    /* no spurious interrupt: high word to all-ones first (doc/SOC_REGMAP.md) */
+    TMR(TIMER_MTIMECMP + 4) = 0xFFFFFFFFu;
+    TMR(TIMER_MTIMECMP)     = (uint32_t)t;
+    TMR(TIMER_MTIMECMP + 4) = (uint32_t)(t >> 32);
 }
 
 uint64_t timer_get_cmp(void)
 {
-    return ((uint64_t)CLINT(CLINT_MTIMECMP + 4) << 32) | CLINT(CLINT_MTIMECMP);
+    return ((uint64_t)TMR(TIMER_MTIMECMP + 4) << 32) | TMR(TIMER_MTIMECMP);
 }
 
 void timer_cancel(void)
 {
-    CLINT(CLINT_MTIMECMP + 4) = 0xFFFFFFFFu;
-    CLINT(CLINT_MTIMECMP)     = 0xFFFFFFFFu;
+    TMR(TIMER_MTIMECMP + 4) = 0xFFFFFFFFu;
+    TMR(TIMER_MTIMECMP)     = 0xFFFFFFFFu;
 }
 
 void timer_set_msip(int on)
 {
-    CLINT(CLINT_MSIP) = on ? 1u : 0u;
+    TMR(TIMER_MSIP) = on ? 1u : 0u;
 }
 
 uint32_t timer_get_msip(void)
 {
-    return CLINT(CLINT_MSIP) & 1u;
+    return TMR(TIMER_MSIP) & 1u;
 }
 
 void timer_delay(uint64_t ticks)

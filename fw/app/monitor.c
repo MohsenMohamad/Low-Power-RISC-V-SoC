@@ -3,14 +3,14 @@
  *
  *   help                      list commands
  *   peek <addr|reg> [n]       read n words (default 1)
- *   poke <addr|reg> <value>   write one word (cached RAM: line is cleaned)
+ *   poke <addr|reg> <value>   write one word (cached RAM: D-cache cleaned)
  *   regs <block>              dump a register block (uart intc pmu timer
- *                             cache handoff)
- *   go <addr>                 jump to address
- *   reset                     software reset of PD_CPU (cold boot path)
+ *                             wtimer handoff)
+ *   go <addr>                 clean D$, invalidate I$, jump to address
  *
- * Accesses that trap (e.g. access faults on the in-house core) are caught
- * and reported as "ERR fault" instead of crashing the monitor.
+ * Accesses that trap (SLVERR -> access fault on the in-house core: unmapped
+ * address or offset, write to a read-only register) are caught and reported
+ * as "ERR fault" instead of crashing the monitor.
  * Output is line oriented so that it can be checked by scripts.
  */
 #include "monitor.h"
@@ -25,40 +25,35 @@ typedef struct { const char *name; uint32_t off; } reg_t;
 typedef struct { const char *name; uint32_t base; const reg_t *regs; unsigned n; } blk_t;
 
 static const reg_t uart_regs[] = {
-    {"data", UART_DATA}, {"status", UART_STATUS}, {"ie", UART_IE}, {"div", UART_DIV},
+    {"txdata", UART_TXDATA}, {"rxdata", UART_RXDATA}, {"status", UART_STATUS}, {"ctrl", UART_CTRL},
 };
 static const reg_t intc_regs[] = {
-    {"pending", INTC_PENDING}, {"enable", INTC_ENABLE}, {"soft", INTC_SOFT_SET},
-    {"soft_clr", INTC_SOFT_CLR}, {"claim", INTC_CLAIM}, {"raw", INTC_RAW},
+    {"pending", INTC_PENDING}, {"enable", INTC_ENABLE}, {"active", INTC_ACTIVE},
 };
 static const reg_t pmu_regs[] = {
-    {"ctrl", PMU_CTRL}, {"status", PMU_STATUS}, {"wake_en", PMU_WAKE_EN},
-    {"dvfs_op", PMU_DVFS_OP}, {"rst_cause", PMU_RST_CAUSE}, {"event", PMU_EVENT},
-    {"event_ie", PMU_EVENT_IE}, {"cnt_idle", PMU_CNT_IDLE}, {"cnt_sleep", PMU_CNT_SLEEP},
-    {"cnt_deep", PMU_CNT_DEEP}, {"cnt_dvfs", PMU_CNT_DVFS}, {"cnt_abort", PMU_CNT_ABORT},
-    {"off_time", PMU_OFF_TIME}, {"wake_src", PMU_WAKE_SRC}, {"id", PMU_ID},
+    {"ctrl", PMU_CTRL}, {"status", PMU_STATUS}, {"dvfs", PMU_DVFS}, {"irq_en", PMU_IRQ_EN},
+    {"scratch0", PMU_SCRATCH0}, {"scratch1", PMU_SCRATCH1}, {"wake_cause", PMU_WAKE_CAUSE},
+    {"sleep_cnt", PMU_SLEEP_CNT}, {"vsel", PMU_VSEL},
 };
 static const reg_t timer_regs[] = {
-    {"msip", CLINT_MSIP}, {"mtimecmp", CLINT_MTIMECMP}, {"mtimecmph", CLINT_MTIMECMP + 4},
-    {"prescale", CLINT_PRESCALE}, {"mtime", CLINT_MTIME}, {"mtimeh", CLINT_MTIME + 4},
+    {"mtime", TIMER_MTIME}, {"mtimeh", TIMER_MTIME + 4}, {"mtimecmp", TIMER_MTIMECMP},
+    {"mtimecmph", TIMER_MTIMECMP + 4}, {"msip", TIMER_MSIP},
 };
-static const reg_t cache_regs[] = {
-    {"ctrl", CACHE_CTRL}, {"line_addr", CACHE_LINE_ADDR}, {"dc_hit", CACHE_DC_HIT},
-    {"dc_miss", CACHE_DC_MISS}, {"dc_wb", CACHE_DC_WB}, {"ic_hit", CACHE_IC_HIT},
-    {"ic_miss", CACHE_IC_MISS}, {"info", CACHE_INFO},
+static const reg_t wtimer_regs[] = {
+    {"ctrl", WT_CTRL}, {"load", WT_LOAD}, {"count", WT_COUNT}, {"status", WT_STATUS},
 };
 static const reg_t handoff_regs[] = {
-    {"boot_status", 0x04}, {"rst_cause", 0x08}, {"cold_boots", 0x0C},
-    {"resumes", 0x10}, {"bad_resumes", 0x14}, {"rom_version", 0x18}, {"signature", 0x1C},
-    {"ctx_magic", 0x40},
+    {"rom_version", 0x00}, {"boot_status", 0x04}, {"rst_cause", 0x08}, {"boot_reason", 0x0C},
+    {"pmu_status", 0x10}, {"cold_boots", 0x14}, {"resumes", 0x18}, {"bad_resumes", 0x1C},
+    {"signature", 0x20}, {"ctx_magic", 0x40}, {"ctx_crc", 0x44},
 };
 
 static const blk_t blocks[] = {
     {"uart",    UART_BASE,    uart_regs,    ARRAY_SIZE(uart_regs)},
     {"intc",    INTC_BASE,    intc_regs,    ARRAY_SIZE(intc_regs)},
     {"pmu",     PMU_BASE,     pmu_regs,     ARRAY_SIZE(pmu_regs)},
-    {"timer",   CLINT_BASE,   timer_regs,   ARRAY_SIZE(timer_regs)},
-    {"cache",   CACHE_BASE,   cache_regs,   ARRAY_SIZE(cache_regs)},
+    {"timer",   TIMER_BASE,   timer_regs,   ARRAY_SIZE(timer_regs)},
+    {"wtimer",  WTIMER_BASE,  wtimer_regs,  ARRAY_SIZE(wtimer_regs)},
     {"handoff", HANDOFF_ADDR, handoff_regs, ARRAY_SIZE(handoff_regs)},
 };
 
@@ -142,7 +137,10 @@ static int cmd_poke(int argc, char **argv)
     if (safe_write(a, v)) { printf_("ERR fault 0x%08x\n", (unsigned)a); return -1; }
 #if PLATFORM_HAS_SOC
     /* make the write visible in RAM (other masters, uncached alias, I$) */
-    if (a >= RAM_BASE && a < RAM_BASE + RAM_SIZE) dcache_clean_range((const void *)(uintptr_t)a, 4);
+    if (a >= RAM_BASE && a < RAM_BASE + RAM_SIZE && dcache_clean()) {
+        puts_("ERR write-back\n");
+        return -1;
+    }
 #endif
     puts_("OK\n");
     return 0;
@@ -152,12 +150,12 @@ static int cmd_regs(int argc, char **argv)
 {
     const blk_t *b = argc > 1 ? find_block(argv[1], strlen(argv[1])) : 0;
     if (!b) {
-        puts_("ERR block: uart intc pmu timer cache handoff\n");
+        puts_("ERR block: uart intc pmu timer wtimer handoff\n");
         return -1;
     }
     for (unsigned i = 0; i < b->n; i++) {
         uint32_t v;
-        if (!strcmp(b->name, "uart") && b->regs[i].off == UART_DATA) continue; /* pops RX */
+        if (!strcmp(b->name, "uart") && b->regs[i].off == UART_RXDATA) continue; /* pops RX */
         if (safe_read(b->base + b->regs[i].off, &v)) {
             printf_("%s.%s: ERR fault\n", b->name, b->regs[i].name);
             continue;
@@ -174,26 +172,17 @@ static int cmd_go(int argc, char **argv)
     if (argc < 2 || mon_parse_addr(argv[1], &a)) { puts_("ERR address\n"); return -1; }
     printf_("jumping to 0x%08x\n", (unsigned)a);
     uart_flush();
-    dcache_clean_all();
-    icache_inv_all();
+    if (cache_sync_icache()) { puts_("ERR write-back\n"); return -1; }
     ((void (*)(void))(uintptr_t)a)();
     return 0;
-}
-
-static int cmd_reset(int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    puts_("resetting CPU domain\n");
-    pmu_sw_reset();
 }
 
 static const mon_cmd_t base_cmds[] = {
     {"help",  "",                "this list",                 cmd_help},
     {"peek",  "<addr|reg> [n]",  "read n words",              cmd_peek},
     {"poke",  "<addr|reg> <val>","write a word",              cmd_poke},
-    {"regs",  "<block>",         "dump uart|intc|pmu|timer|cache|handoff", cmd_regs},
+    {"regs",  "<block>",         "dump uart|intc|pmu|timer|wtimer|handoff", cmd_regs},
     {"go",    "<addr>",          "jump to address",           cmd_go},
-    {"reset", "",                "software reset of PD_CPU",  cmd_reset},
 };
 
 static void help_list(const mon_cmd_t *c, unsigned n)
