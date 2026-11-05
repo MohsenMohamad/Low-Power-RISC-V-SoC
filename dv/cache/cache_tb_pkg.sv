@@ -261,8 +261,8 @@ package cache_tb_pkg;
     endtask
 
     // One maintenance operation (D$: clean / flush, I$: invalidate).
-    task maint(bit inval);
-      @(negedge vif.clk);
+    task maint(bit inval, bit sync = 1);
+      if (sync) @(negedge vif.clk);   // sync=0: caller is already at a negedge
       vif.req = 0;
       vif.maint_req = 1;
       vif.maint_inval = inval;
@@ -295,7 +295,7 @@ package cache_tb_pkg;
         // maintenance: decided at request-selection time, performed once the
         // outstanding response (if any) has returned
         if (maint_wanted && !have_pend) begin
-          maint($urandom_range(1));
+          maint($urandom_range(1), 0);
           maint_wanted = 0;
           continue;
         end
@@ -363,6 +363,77 @@ package cache_tb_pkg;
                name, n_req, n_checks, n_err_rsp, n_retract, n_maint, n_mem_checks, n_stale_hits, n_mismatch);
       $display("[%s] axi: reads=%0d writes=%0d read_errors=%0d write_errors=%0d",
                name, slv.n_rd, slv.n_wr, slv.n_rd_err, slv.n_wr_err);
+    endfunction
+  endclass
+
+  // ---------------------------------------------------------------------------
+  // Replacement-policy reference model (2-way, 128 sets, 16 B lines, LRU,
+  // invalid ways filled first). Checks hit/miss, hit way and victim way of
+  // every first lookup, which data checks alone cannot observe.
+  class repl_model;
+    string     name;
+    bit [20:0] tag_m   [128][2];
+    bit        valid_m [128][2];
+    bit        lru_m   [128];
+    bit        fill_pending;
+    bit [31:0] fill_addr;
+    bit        fill_way;
+    int        n_lookups, n_hits, n_misses, n_errors;
+
+    function new(string nm);
+      name = nm;
+      inval_all();
+    endfunction
+
+    function void inval_all();
+      for (int s = 0; s < 128; s++) begin
+        valid_m[s][0] = 0; valid_m[s][1] = 0; lru_m[s] = 0;
+      end
+      fill_pending = 0;
+    endfunction
+
+    function void err(string m);
+      n_errors++;
+      $error("[%s repl] %s", name, m);
+    endfunction
+
+    // Called once per first lookup (not for the re-lookup after a refill).
+    function void lookup(bit [31:0] a, bit dut_hit, bit dut_way, bit dut_victim);
+      int  s = a[10:4];
+      bit  h0 = valid_m[s][0] && tag_m[s][0] == a[31:11];
+      bit  h1 = valid_m[s][1] && tag_m[s][1] == a[31:11];
+      bit  v;
+      n_lookups++;
+      if ((h0 || h1) != dut_hit) begin
+        err($sformatf("hit mismatch addr=%h model=%0d dut=%0d", a, h0 || h1, dut_hit));
+        return;
+      end
+      if (h0 || h1) begin
+        n_hits++;
+        if (h1 != dut_way) err($sformatf("hit way mismatch addr=%h model=%0d dut=%0d", a, h1, dut_way));
+        lru_m[s] = !h1;
+      end else begin
+        n_misses++;
+        v = !valid_m[s][0] ? 1'b0 : !valid_m[s][1] ? 1'b1 : lru_m[s];
+        if (v != dut_victim) err($sformatf("victim mismatch addr=%h set=%0d model=%0d dut=%0d", a, s, v, dut_victim));
+        valid_m[s][v] = 0;        // the victim is invalidated when the miss is detected
+        fill_pending = 1; fill_addr = a; fill_way = v;
+      end
+    endfunction
+
+    // Refill completed without error: the line is allocated.
+    function void filled();
+      int s = fill_addr[10:4];
+      if (!fill_pending) begin err("fill without pending miss"); return; end
+      valid_m[s][fill_way] = 1;
+      tag_m[s][fill_way]   = fill_addr[31:11];
+      lru_m[s]             = !fill_way;
+      fill_pending = 0;
+    endfunction
+
+    function void report();
+      $display("[%s repl] lookups=%0d hits=%0d misses=%0d policy_errors=%0d",
+               name, n_lookups, n_hits, n_misses, n_errors);
     endfunction
   endclass
 

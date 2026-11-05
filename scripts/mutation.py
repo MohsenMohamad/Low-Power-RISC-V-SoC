@@ -4,7 +4,7 @@
 Each mutant is a single textual edit of one RTL file, made in a scratch copy of
 the repository. Core/bus mutants are run against the Spike lockstep regression
 (a reduced seed set plus the arch-test smoke subset); cache mutants are also run
-against the SystemVerilog cache testbenches. A mutant is "killed" if any flow
+against the SystemVerilog unit testbenches (caches, AXI mux). A mutant is "killed" if any flow
 fails.
 """
 import argparse
@@ -75,7 +75,7 @@ MUTANTS = [
     ("mux_rd_owner", "rtl/bus/axil_mux2.sv",
      "P_RESP: if (m_rvalid && s_rready[rd_own_q]) begin rd_q <= P_IDLE; rd_last_q <= rd_own_q; end",
      "P_RESP: if (m_rvalid) begin rd_q <= P_IDLE; rd_last_q <= rd_own_q; end",
-     "AXI mux releases read path without RREADY", False),
+     "AXI mux releases read path without RREADY", True),
 ]
 
 
@@ -111,7 +111,7 @@ def one(args, m):
         rc, out = sh(f"make -C dv/cache VERILATOR={args.verilator} BUILD={work}/build/cachetest "
                      f"SEEDS='1 2' N=3000", work)
         if rc:
-            killed_by.append("cache-tb")
+            killed_by.append("unit-tb")
     return {"id": mid, "desc": desc, "status": "KILLED" if killed_by else "SURVIVED",
             "killed_by": killed_by}
 

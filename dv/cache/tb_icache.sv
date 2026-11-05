@@ -89,6 +89,23 @@ module tb_icache;
   c_retract:         cover property (@(posedge clk) disable iff (!rst_n) cif.req && !cif.gnt ##1 !cif.req);
   c_inval_after_hit: cover property (@(posedge clk) disable iff (!rst_n) lookup && dut.hit ##1 cif.maint_req);
 
+
+  // ---------------------------------------------------------------------------
+  // Replacement-policy reference model (sampled mid-cycle on stable state)
+  // ---------------------------------------------------------------------------
+  repl_model repl = new("icache");
+  logic [2:0] prev_state;
+  always @(negedge clk) begin
+    if (!rst_n) begin
+      prev_state <= 3'd0;
+    end else begin
+      if (lookup && prev_state != 3'd4) repl.lookup(dut.rq_addr_q, dut.hit, dut.hit_way, dut.victim_sel);
+      if (dut.state_q == 3'd4) repl.filled();                       // REPLAY: refill succeeded
+      if (cif.maint_done) repl.inval_all();
+      prev_state <= dut.state_q;
+    end
+  end
+
   // ---------------------------------------------------------------------------
   // Test
   // ---------------------------------------------------------------------------
@@ -152,6 +169,8 @@ module tb_icache;
     agt.tx.c_region.constraint_mode(1);
 
     agt.report();
+    repl.report();
+    agt.n_mismatch += repl.n_errors;
     if (agt.n_mismatch == 0) $display("[tb_icache] PASS");
     else $display("[tb_icache] FAIL mismatches=%0d", agt.n_mismatch);
     $finish;

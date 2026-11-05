@@ -260,28 +260,47 @@ class Gen:
             self.emit(f"csrrs x{self.rd()}, 0x{csr:03x}, x0")
 
     def s_system(self):
-        k = self.r.choice(["ecall", "ebreak", "illegal", "illegal", "fence", "fence.i"])
+        k = self.r.choice(["ecall", "ebreak", "illegal", "illegal", "fieldfuzz", "fieldfuzz",
+                           "fence", "fence.i"])
+        rd, rs1, rs2 = self.r.randint(0, 31), self.r.randint(0, 31), self.r.randint(0, 31)
         if k == "illegal":
-            rd, rs1, rs2 = self.r.randint(0, 31), self.r.randint(0, 31), self.r.randint(0, 31)
             w = self.r.choice([
                 0x00000000, 0xFFFFFFFF,
                 (self.r.getrandbits(32) & ~0x7F) | 0x0B,                     # custom-0
                 (self.r.getrandbits(32) & ~0x7F) | 0x5B,                     # custom-2
                 0x0000_0001 | self.r.getrandbits(15) << 2,                   # compressed
-                (0x7F << 25) | rs2 << 20 | rs1 << 15 | rd << 7 | 0x33,       # bad funct7
-                (0x20 << 25) | rs2 << 20 | rs1 << 15 | 1 << 12 | rd << 7 | 0x33,
-                (0x20 << 25) | self.r.randint(0, 31) << 20 | rs1 << 15 | 1 << 12 | rd << 7 | 0x13,  # slli bad
                 enc_i(0x03, 3, rd, rs1, 0),                                  # ld (RV64)
                 enc_i(0x03, 6, rd, rs1, 0),                                  # lwu
-                enc_i(0x23, 3, 0, rs1, 0) | rs2 << 20,                        # sd
-                enc_i(0x67, 1, rd, rs1, 0),                                  # jalr f3!=0
-                enc_b(2, rs1, rs2, 8),                                       # branch f3=2
+                enc_i(0x03, 7, rd, rs1, 0),
+                enc_i(0x23, self.r.choice([3, 4, 5, 6, 7]), 0, rs1, 0) | rs2 << 20,  # bad store width
+                enc_i(0x67, self.r.randint(1, 7), rd, rs1, 0),               # jalr f3!=0
+                enc_b(self.r.choice([2, 3]), rs1, rs2, 8),                   # branch f3=2/3
                 enc_i(0x73, 4, rd, rs1, 0x300),                              # csr f3=4
-                0x10200073,                                                  # sret (no S)
-                0x7B200073,                                                  # dret
-                enc_i(0x0F, 2, rd, rs1, 0),                                  # misc-mem f3=2
+                enc_i(0x0F, self.r.randint(2, 7), rd, rs1, 0),               # misc-mem f3>1
+                # exact-match SYSTEM encodings with a stray field set
+                0x00000073 | max(rd, 1) << 7,                                # ecall, rd!=0
+                0x00100073 | max(rs1, 1) << 15,                              # ebreak, rs1!=0
+                0x30200073 | max(rd, 1) << 7,                                # mret, rd!=0
+                0x10500073 | max(rs1, 1) << 15,                              # wfi, rs1!=0
+                0x10200073, 0x00200073, 0x7B200073, 0x12000073,              # sret, uret, dret, sfence.vma
             ])
             self.emit(f".word 0x{w:08x}  # illegal")
+        elif k == "fieldfuzz":
+            # Random funct fields on opcodes whose only effect is an rd write:
+            # legal or illegal is decided by the reference model.
+            rd = self.r.choice(RAND_REGS)
+            f7 = self.r.choice([0x00, 0x20, 0x01, 0x10, 0x40, 0x21, 0x60, self.r.randint(0, 127)])
+            kind = self.r.choice(["op", "shift"])
+            if kind == "op":
+                w = f7 << 25 | rs2 << 20 | rs1 << 15 | self.r.randint(0, 7) << 12 | rd << 7 | 0x33
+            else:
+                w = f7 << 25 | self.r.randint(0, 31) << 20 | rs1 << 15 | self.r.choice([1, 5]) << 12 | rd << 7 | 0x13
+            self.emit(f".word 0x{w:08x}  # field fuzz")
+        elif k == "ecall":
+            # The handler resumes two instructions after ecall: the store in the
+            # shadow must never reach memory (catches stores issued under a trap).
+            self.emit("ecall")
+            self.emit(f"sw x{self.r.choice(RAND_REGS)}, {self.mem_off(4)}(x28)  # shadow: skipped")
         else:
             self.emit(k)
 
@@ -357,8 +376,15 @@ class Gen:
             "  bltz x30, 1f",
             "  li x31, 1",
             "  beq x30, x31, 2f",
+            "  li x31, 11",
+            "  beq x30, x31, 3f",
             "  csrr x31, mepc",
             "  addi x31, x31, 4",
+            "  csrw mepc, x31",
+            "  mret",
+            "3:",                         # ecall: skip the shadow instruction too
+            "  csrr x31, mepc",
+            "  addi x31, x31, 8",
             "  csrw mepc, x31",
             "  mret",
             "2:",

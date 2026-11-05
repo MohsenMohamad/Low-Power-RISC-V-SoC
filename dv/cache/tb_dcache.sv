@@ -124,6 +124,23 @@ module tb_dcache;
   c_last_line_dirty: cover property (@(posedge clk) disable iff (!rst_n) dut.state_q == 5'd12 && dut.fl_line_dirty && dut.fl_last);
   c_retract:         cover property (@(posedge clk) disable iff (!rst_n) cif.req && !cif.gnt ##1 !cif.req);
 
+
+  // ---------------------------------------------------------------------------
+  // Replacement-policy reference model (sampled mid-cycle on stable state)
+  // ---------------------------------------------------------------------------
+  repl_model repl = new("dcache");
+  logic [4:0] prev_state;
+  always @(negedge clk) begin
+    if (!rst_n) begin
+      prev_state <= 5'd0;
+    end else begin
+      if (lookup && prev_state != 5'd7) repl.lookup(dut.rq_addr_q, dut.hit, dut.hit_way, dut.victim_sel);
+      if (dut.state_q == 5'd7) repl.filled();                       // REPLAY: refill succeeded
+      if (cif.maint_done && cif.maint_inval) repl.inval_all();
+      prev_state <= dut.state_q;
+    end
+  end
+
   // ---------------------------------------------------------------------------
   // Test
   // ---------------------------------------------------------------------------
@@ -191,6 +208,8 @@ module tb_dcache;
     agt.maint(1);
 
     agt.report();
+    repl.report();
+    agt.n_mismatch += repl.n_errors;
     if (agt.n_mismatch == 0) $display("[tb_dcache] PASS");
     else $display("[tb_dcache] FAIL mismatches=%0d", agt.n_mismatch);
     $finish;

@@ -7,6 +7,7 @@ interrupt rate, direct/vectored mtvec). Results are written to
 """
 import argparse
 import concurrent.futures as cf
+import glob
 import json
 import os
 import subprocess
@@ -56,6 +57,30 @@ def run_one(args, seed):
     return seed, ok, msg, stats
 
 
+def run_directed(args, src):
+    """Directed self-checking programs in sw/tests (lockstep unless '# COSIM: off')."""
+    name = os.path.basename(src)[:-2]
+    d = os.path.join(args.out, "directed", name)
+    os.makedirs(d, exist_ok=True)
+    elf = os.path.join(d, "test.elf")
+    cc = subprocess.run([args.rv_prefix + "gcc", "-march=rv32im_zicsr_zifencei", "-mabi=ilp32",
+                         "-nostdlib", "-nostartfiles", "-Wl,--no-warn-rwx-segments",
+                         "-T", os.path.join(ROOT, "sw/common/link.ld"), src, "-o", elf],
+                        capture_output=True, text=True)
+    if cc.returncode:
+        return name, False, cc.stderr[-500:]
+    cosim = "# COSIM: off" not in open(src).read()
+    res = []
+    for cfg in ({"ready_pct": 100, "max_lat": 0}, {"ready_pct": 60, "max_lat": 4}):
+        cmd = [args.bin, f"+elf={elf}", f"+cosim={int(cosim)}", f"+memcmp={int(cosim)}",
+               f"+cov={d}/isa.cov", f"+vcov={d}/coverage_{cfg['ready_pct']}.dat"] + \
+              [f"+{k}={v}" for k, v in cfg.items()]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=args.timeout)
+        res.append(p.returncode == 0 and "[tb] PASS" in p.stdout)
+        open(os.path.join(d, f"run_{cfg['ready_pct']}.log"), "w").write(p.stdout + p.stderr)
+    return name + ("" if cosim else " (self-checking, no cosim)"), all(res), ""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bin", required=True)
@@ -66,8 +91,14 @@ def main():
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--out", required=True)
     ap.add_argument("--rv-prefix", default="riscv64-unknown-elf-")
+    ap.add_argument("--directed", type=int, default=1, help="also run sw/tests/*.S")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+
+    directed = sorted(glob.glob(os.path.join(ROOT, "sw/tests/*.S")))
+    dres = [run_directed(args, src) for src in directed] if args.directed else []
+    for name, ok, msg in dres:
+        print(f"directed {name}: {'PASS' if ok else 'FAIL'} {msg}")
 
     seeds = range(args.first_seed, args.first_seed + args.seeds)
     results = []
@@ -78,7 +109,7 @@ def main():
                 print(f"seed {seed}: FAIL\n{msg}\n")
     npass = sum(r["pass"] for r in results)
     tot = {k: sum(int(r.get(k, 0)) for r in results) for k in ("retired", "traps", "irqs", "cycles")}
-    summary = {"seeds": len(results), "pass": npass, "fail": len(results) - npass,
+    summary = {"directed": [{"test": n, "pass": ok} for n, ok, _ in dres], "seeds": len(results), "pass": npass, "fail": len(results) - npass,
                "pass_rate": npass / max(1, len(results)), "totals": tot,
                "failing_seeds": [r["seed"] for r in results if not r["pass"]], "results": results}
     with open(os.path.join(args.out, "summary.json"), "w") as f:
@@ -86,7 +117,7 @@ def main():
     print(f"COSIM: {npass}/{len(results)} seeds passed ({100.0 * summary['pass_rate']:.1f}%), "
           f"{tot['retired']} instructions retired, {tot['traps']} exceptions, {tot['irqs']} interrupts "
           f"compared against Spike")
-    sys.exit(0 if npass == len(results) else 1)
+    sys.exit(0 if npass == len(results) and all(ok for _, ok, _ in dres) else 1)
 
 
 if __name__ == "__main__":

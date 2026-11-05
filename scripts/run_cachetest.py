@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the SystemVerilog cache testbenches over a set of seeds and summarise."""
+"""Run the SystemVerilog unit testbenches (caches, AXI mux) over a set of seeds and summarise."""
 import argparse
 import concurrent.futures as cf
 import json
@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 
-BENCHES = {"dcache": "dc/Vtb_dcache", "icache": "ic/Vtb_icache"}
+BENCHES = {"dcache": "dc/Vtb_dcache", "icache": "ic/Vtb_icache", "axilmux": "mux/Vtb_axil_mux"}
 
 
 def run(build, bench, seed, n):
@@ -55,6 +55,9 @@ def main():
                          ("requests", "checks", "error_responses", "retractions", "maint_ops",
                           "mem_word_checks", "stale_ok", "mismatches")}}
         s = summary[b]
+        if b == "axilmux":
+            print(f"UNITTEST {b}: {s['pass']}/{s['runs']} seeds passed")
+            continue
         print(f"CACHETEST {b}: {s['pass']}/{s['runs']} seeds passed, {s['checks']} responses checked, "
               f"{s['error_responses']} error responses, {s['maint_ops']} maintenance ops, "
               f"{s['mem_word_checks']} post-maintenance memory checks, {s['mismatches']} mismatches")
