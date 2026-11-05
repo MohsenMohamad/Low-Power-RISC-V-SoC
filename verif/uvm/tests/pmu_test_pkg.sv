@@ -136,7 +136,7 @@ package pmu_test_pkg;
     function new(string name, uvm_component parent); super.new(name, parent); endfunction
     task main();
       pmu_reg_rand_vseq s = pmu_reg_rand_vseq::type_id::create("reg_rand");
-      if (!s.randomize() with { (iters != 0) -> n == iters; }) `uvm_fatal("TEST", "randomize failed")
+      if (!s.randomize() with { (local::iters != 0) -> n == local::iters; }) `uvm_fatal("TEST", "randomize failed")
       run_vseq(s);
     endtask
   endclass
@@ -148,7 +148,7 @@ package pmu_test_pkg;
     task main();
       pmu_pwr_rand_vseq    p  = pmu_pwr_rand_vseq::type_id::create("pwr_rand");
       pmu_bus_traffic_vseq bg = pmu_bus_traffic_vseq::type_id::create("traffic");
-      if (!p.randomize() with { (iters != 0) -> n == iters; }) `uvm_fatal("TEST", "randomize failed")
+      if (!p.randomize() with { (local::iters != 0) -> n == local::iters; }) `uvm_fatal("TEST", "randomize failed")
       fork
         bg.start(env.vsqr);
         begin

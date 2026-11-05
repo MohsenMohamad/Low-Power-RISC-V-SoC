@@ -18,10 +18,11 @@ class axi_lite_reg_adapter extends uvm_reg_adapter;
   endfunction
 
   virtual function uvm_sequence_item reg2bus(const ref uvm_reg_bus_op rw);
-    axi_lite_item t = axi_lite_item::type_id::create("reg_tr");
-    if (!t.randomize() with { kind == ((rw.kind == UVM_WRITE) ? AXI_WRITE : AXI_READ);
-                              addr == rw.addr[31:0];
-                              dly_mode == local::dly_mode; })
+    axi_lite_item   t  = axi_lite_item::type_id::create("reg_tr");
+    axi_lite_kind_e k  = (rw.kind == UVM_WRITE) ? AXI_WRITE : AXI_READ;
+    bit [31:0]      a  = rw.addr[31:0];
+    axi_lite_dly_e  dm = dly_mode;
+    if (!t.randomize() with { kind == k; addr == a; dly_mode == dm; })
       `uvm_fatal("ADAPT", "randomize failed")
     t.data = rw.data[31:0];
     t.strb = (rw.kind == UVM_WRITE) ? rw.byte_en[3:0] : 4'hF;
