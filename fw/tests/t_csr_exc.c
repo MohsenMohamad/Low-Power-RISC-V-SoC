@@ -62,13 +62,20 @@ static int t_mregs(void)
     (void)csr_read(marchid);
     (void)csr_read(mimpid);
 
-    /* mstatus.MIE toggles, MPP is M (machine-mode only) */
+    /* mstatus.MIE toggles; MPP is hardwired to M when there is no U-mode,
+     * otherwise it is WARL and must accept M */
     uint32_t st = csr_read(mstatus);
     csr_set(mstatus, MSTATUS_MIE);
     CHECK(csr_read(mstatus) & MSTATUS_MIE);
     csr_clear(mstatus, MSTATUS_MIE);
     CHECK(!(csr_read(mstatus) & MSTATUS_MIE));
-    CHECK_EQ((csr_read(mstatus) & MSTATUS_MPP) >> 11, 3);
+    if (!(misa & (1u << ('U' - 'A')))) {
+        csr_clear(mstatus, MSTATUS_MPP);
+        CHECK_EQ((csr_read(mstatus) & MSTATUS_MPP) >> 11, 3);
+    } else {
+        csr_set(mstatus, MSTATUS_MPP);
+        CHECK_EQ((csr_read(mstatus) & MSTATUS_MPP) >> 11, 3);
+    }
     csr_write(mstatus, st);
 
     /* mie: the three machine interrupt enables are writable */

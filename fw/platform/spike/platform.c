@@ -25,7 +25,7 @@ uint32_t platform_caps(void)
 
 void platform_putc(char c)
 {
-    htif_cmd(1, 1, (uint8_t)c, 1);     /* bcd device: putchar */
+    htif_cmd(1, 1, (uint8_t)c, 0);     /* bcd device: putchar (no response) */
 }
 
 int platform_getc(void)

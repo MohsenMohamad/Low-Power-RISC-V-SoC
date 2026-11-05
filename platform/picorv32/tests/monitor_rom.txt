@@ -1,0 +1,27 @@
+# Boot ROM fallback monitor: no application image in RAM.
+< \[ROM\] LPSOC boot ROM 1\.0, reset cause POR
+< \[ROM\] no valid image
+< monitor ready
+> help
+< ^  peek
+< ^  go
+! ^  run
+> peek handoff.boot_status
+< ^0x20000004: 0x00000004$
+> peek pmu.rst_cause
+< ^0x40002010: 0x00000001$
+> regs cache
+< ^cache\.ctrl +0x50000000: 0x00000003$
+# load a 3-instruction program by hand and run it:
+#   lui t0, 0x4f000 ; sw zero, 0(t0) [simctrl EXIT = 0] ; j .
+> poke 0x20002000 0x4f0002b7
+< ^OK$
+> poke 0x20002004 0x0002a023
+< ^OK$
+> poke 0x20002008 0x0000006f
+< ^OK$
+> peek 0x30002000 3
+< ^0x30002000: 0x4f0002b7$
+< ^0x30002008: 0x0000006f$
+> go 0x20002000
+< ^jumping to 0x20002000$

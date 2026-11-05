@@ -3,7 +3,7 @@
  *
  *   help                      list commands
  *   peek <addr|reg> [n]       read n words (default 1)
- *   poke <addr|reg> <value>   write one word
+ *   poke <addr|reg> <value>   write one word (cached RAM: line is cleaned)
  *   regs <block>              dump a register block (uart intc pmu timer
  *                             cache handoff)
  *   go <addr>                 jump to address
@@ -140,6 +140,10 @@ static int cmd_poke(int argc, char **argv)
     if (parse_u32(argv[2], &v)) { puts_("ERR value\n"); return -1; }
     if (a & 3) { puts_("ERR alignment\n"); return -1; }
     if (safe_write(a, v)) { printf_("ERR fault 0x%08x\n", (unsigned)a); return -1; }
+#if PLATFORM_HAS_SOC
+    /* make the write visible in RAM (other masters, uncached alias, I$) */
+    if (a >= RAM_BASE && a < RAM_BASE + RAM_SIZE) dcache_clean_range((const void *)(uintptr_t)a, 4);
+#endif
     puts_("OK\n");
     return 0;
 }

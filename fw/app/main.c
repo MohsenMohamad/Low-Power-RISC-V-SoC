@@ -19,7 +19,7 @@
 
 static int autorun;
 
-static const char *boot_str(uint32_t b)
+static __attribute__((unused)) const char *boot_str(uint32_t b)
 {
     switch (b) {
     case BOOT_COLD:          return "cold";
