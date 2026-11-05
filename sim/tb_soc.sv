@@ -29,9 +29,10 @@
 
 `define PD_CPU_PATH tb_soc.dut.u_pd_cpu
 // Corruption values are cast to the target's own type (enum-typed state).
+// Icarus (CORRUPT_X) simulates the sv2v-converted RTL, which has no enums.
 `ifdef CORRUPT_X
-  `define PD_CPU_CORRUPT(lhs, width) lhs <= type(lhs)'('x);
-  `define PD_CPU_CORRUPT_BLK(lhs, width) lhs = type(lhs)'('x);
+  `define PD_CPU_CORRUPT(lhs, width) lhs <= 'x;
+  `define PD_CPU_CORRUPT_BLK(lhs, width) lhs = 'x;
   `define PD_CPU_FORCE(lhs, width)   force lhs = 'x;
 `else
   `define PD_CPU_CORRUPT(lhs, width) lhs <= type(lhs)'(width'({$urandom, $urandom, $urandom, $urandom}));
@@ -83,6 +84,19 @@ module tb_soc #(
     if (dut.u_aon.u_rom.g_rom.u_rom.mem[0] === 32'h0000_0013 || $isunknown(dut.u_aon.u_rom.g_rom.u_rom.mem[0]))
       $fatal(1, "[tb] ROM image %s not loaded", rom);
     $display("[tb] ROM image: %s", rom);
+  end
+
+  // ---------------- main RAM power-up content ----------------
+  // An SRAM powers up with arbitrary but defined bits. The 4-state X check
+  // below must flag only X injected by the PD_CPU corruption model, not X from
+  // never-written RAM words that the write-back D-cache refills and writes
+  // back as part of a full line. Random words, seeded (+ram_seed).
+  initial begin
+    int unsigned rs;
+    if (!$value$plusargs("ram_seed=%d", rs)) rs = 1;
+    void'($urandom(rs));
+    #1;
+    for (int i = 0; i < 32768; i++) dut.u_aon.u_ram.g_ram.u_ram.mem[i] = $urandom;
   end
 
   // ---------------- OFF-state corruption model ----------------
@@ -355,9 +369,10 @@ module tb_soc #(
       req = (dut.u_aon.u_pmu.mode_lat_q == 2'd0) ? 1 : (dut.u_aon.u_pmu.mode_lat_q == 2'd2) ? 3 : 2;
       aborted[req]++;
       ep_aborted = 1'b1;
-      $display("[tb] ABORTED transition RUN -> %s (%s) @%0t", psn(req),
-               state_prev == 5'd1 ? "core left WFI before idle_ack" : "power-down refused by PMU",
-               $time);
+      if (state_prev == 5'd1)
+        $display("[tb] ABORTED transition RUN -> %s (core left WFI before idle_ack) @%0t", psn(req), $time);
+      else
+        $display("[tb] ABORTED transition RUN -> %s (power-down refused by PMU) @%0t", psn(req), $time);
     end
     if (cov_s == ST_RUN) begin
       cov_ps = 0;

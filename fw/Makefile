@@ -10,7 +10,7 @@ BUILD   ?= ../build/fw
 ARCH    := -march=rv32im_zicsr_zifencei -mabi=ilp32
 CFLAGS  := $(ARCH) -O2 -g -ffreestanding -fno-builtin -nostdlib -mno-relax \
            -msmall-data-limit=0 -Wall -Wextra -Werror -Iinclude
-LDFLAGS := $(ARCH) -nostdlib -nostartfiles -Wl,-T,link.ld -Wl,--no-relax -static -lgcc
+LDFLAGS := $(ARCH) -nostdlib -nostartfiles -Wl,-T,link.ld -Wl,--no-relax -Wl,--no-warn-rwx-segments -static -lgcc
 
 PROGS   := pm_test boot_test
 
