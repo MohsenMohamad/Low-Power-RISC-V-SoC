@@ -1,81 +1,46 @@
-/*
- * Cache maintenance driver (4 KB 2-way I$ and write-back D$, 16 B lines).
+/* Cache maintenance through the CPU CSR mcachectl (0x7C0) only (doc/SPEC.md:
+ * there is no memory-mapped cache controller). Supported operations: D-cache
+ * clean, D-cache flush (clean + invalidate), I-cache invalidate. A CSR write
+ * stalls until the operation completed, i.e. every write-back's AXI response
+ * arrived; bit 31 then reports a write-back error, which is checked after
+ * every clean and flush.
  *
- * Command writes block until the operation is complete. After any power-up
- * the tag arrays hold garbage: cache_init() (INV_ALL) must run before the
- * caches are enabled, and FLUSH/CLEAN must not be used before that.
- */
+ * Spike has no caches and no mcachectl: memory is coherent, only fence.i is
+ * needed after writing code. */
 #include "drivers.h"
 
-#define CC(off) REG32(CACHE_BASE + (off))
-
-static void line_op(uint32_t cmd_reg, uint32_t cmd, const void *p, uint32_t len)
+#if PLATFORM_HAS_SOC
+static uint32_t mcachectl(uint32_t cmd)
 {
-    uintptr_t a   = (uintptr_t)p & ~(uintptr_t)(CACHE_LINE_SIZE - 1);
-    uintptr_t end = (uintptr_t)p + len;
-    for (; a < end; a += CACHE_LINE_SIZE) {
-        CC(CACHE_LINE_ADDR) = (uint32_t)a;
-        CC(cmd_reg) = cmd;
-    }
+    uint32_t v;
+    __asm__ volatile("csrw 0x7C0, %1\n\tcsrr %0, 0x7C0" : "=r"(v) : "r"(cmd) : "memory");
+    return v;
 }
 
-void cache_init(void)
+int dcache_clean(void)
 {
-    CC(CACHE_CTRL) = 0;
-    CC(CACHE_IC_CMD) = CACHE_CMD_INV_ALL;
-    CC(CACHE_DC_CMD) = CACHE_CMD_INV_ALL;
-    CC(CACHE_CTRL) = CACHE_CTRL_IC_EN | CACHE_CTRL_DC_EN;
+    return (mcachectl(MCACHECTL_DCLEAN) & MCACHECTL_WBERR) ? -1 : 0;
 }
 
-void icache_enable(int en)
+int dcache_flush(void)
 {
-    uint32_t c = CC(CACHE_CTRL);
-    CC(CACHE_CTRL) = en ? (c | CACHE_CTRL_IC_EN) : (c & ~CACHE_CTRL_IC_EN);
+    return (mcachectl(MCACHECTL_DFLUSH) & MCACHECTL_WBERR) ? -1 : 0;
 }
 
-void dcache_enable(int en)
+void icache_invalidate(void)
 {
-    uint32_t c = CC(CACHE_CTRL);
-    if (!en && (c & CACHE_CTRL_DC_EN))
-        CC(CACHE_DC_CMD) = CACHE_CMD_FLUSH_ALL;   /* write back before bypass */
-    CC(CACHE_CTRL) = en ? (c | CACHE_CTRL_DC_EN) : (c & ~CACHE_CTRL_DC_EN);
+    (void)mcachectl(MCACHECTL_IINVAL);
 }
 
-uint32_t cache_ctrl(void)
+int cache_sync_icache(void)
 {
-    return CC(CACHE_CTRL);
+    int r = dcache_clean();
+    icache_invalidate();
+    return r;
 }
-
-void icache_inv_all(void)   { CC(CACHE_IC_CMD) = CACHE_CMD_INV_ALL; }
-void dcache_inv_all(void)   { CC(CACHE_DC_CMD) = CACHE_CMD_INV_ALL; }
-void dcache_clean_all(void) { CC(CACHE_DC_CMD) = CACHE_CMD_CLEAN_ALL; }
-void dcache_flush_all(void) { CC(CACHE_DC_CMD) = CACHE_CMD_FLUSH_ALL; }
-
-void dcache_clean_range(const void *p, uint32_t len) { line_op(CACHE_DC_CMD, CACHE_CMD_CLEAN_LINE, p, len); }
-void dcache_inv_range(const void *p, uint32_t len)   { line_op(CACHE_DC_CMD, CACHE_CMD_INV_LINE, p, len); }
-void dcache_flush_range(const void *p, uint32_t len) { line_op(CACHE_DC_CMD, CACHE_CMD_FLUSH_LINE, p, len); }
-void icache_inv_range(const void *p, uint32_t len)   { line_op(CACHE_IC_CMD, CACHE_CMD_INV_LINE, p, len); }
-
-void cache_sync_icache(const void *p, uint32_t len)
-{
-    dcache_clean_range(p, len);
-    icache_inv_range(p, len);
-}
-
-void cache_stats(cache_stats_t *s)
-{
-    s->dhit  = CC(CACHE_DC_HIT);
-    s->dmiss = CC(CACHE_DC_MISS);
-    s->dwb   = CC(CACHE_DC_WB);
-    s->ihit  = CC(CACHE_IC_HIT);
-    s->imiss = CC(CACHE_IC_MISS);
-}
-
-void cache_stats_clear(void)
-{
-    CC(CACHE_DC_HIT) = 0;
-    CC(CACHE_DC_MISS) = 0;
-    CC(CACHE_DC_WB) = 0;
-    CC(CACHE_IC_HIT) = 0;
-    CC(CACHE_IC_MISS) = 0;
-}
+#else
+int dcache_clean(void)  { __asm__ volatile("fence" ::: "memory"); return 0; }
+int dcache_flush(void)  { __asm__ volatile("fence" ::: "memory"); return 0; }
+void icache_invalidate(void) { __asm__ volatile("fence.i" ::: "memory"); }
+int cache_sync_icache(void)  { __asm__ volatile("fence.i" ::: "memory"); return 0; }
+#endif

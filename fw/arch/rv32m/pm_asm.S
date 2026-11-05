@@ -1,21 +1,30 @@
-/* void pm_flush_and_wfi(uint32_t pmu_ctrl, uint32_t do_flush)
- * Final power-down step. After the D$ flush nothing is written to cacheable
- * memory (no stack use), so the flushed state is exactly what survives. */
+/* int pm_clean_and_wfi(uint32_t pmu_ctrl, uint32_t do_clean)
+ * Final power-down step (doc/SOC_REGMAP.md "Low-power entry", step 3-4):
+ * clean the D-cache with mcachectl bit 2, check bit 31 (write-back error),
+ * write PMU CTRL, WFI. Nothing is written to cacheable memory after the clean
+ * (no stack use), so the cleaned state is exactly what survives power-off.
+ * Returns 0 if the CPU was not powered down, -1 on a write-back error. */
 #include "platform.h"
 
     .section .text.pm_asm, "ax"
-    .globl pm_flush_and_wfi
+    .globl pm_clean_and_wfi
     .balign 4
-pm_flush_and_wfi:
+pm_clean_and_wfi:
 #if PLATFORM_HAS_SOC
     beqz a1, 1f
-    li t0, CACHE_BASE
-    li t1, CACHE_CMD_FLUSH_ALL
-    sw t1, CACHE_DC_CMD(t0)         /* blocks until the flush is complete */
+    csrwi 0x7C0, 4                  /* D-cache clean, stalls until complete */
+    csrr t1, 0x7C0
+    bltz t1, 2f                     /* bit 31: write-back error */
 1:
     li t0, PMU_BASE
     sw a0, PMU_CTRL(t0)
     fence
 #endif
     wfi
+    li a0, 0
     ret
+#if PLATFORM_HAS_SOC
+2:
+    li a0, -1
+    ret
+#endif
