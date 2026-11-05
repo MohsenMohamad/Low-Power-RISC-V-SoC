@@ -186,6 +186,7 @@ static int t_wfi_wake(void)
 {
     /* WFI with the source enabled but interrupts globally disabled must
      * resume execution without taking the interrupt */
+    uint32_t idle0 = (suite_caps() & CAP_PMU) ? pmu_idle_count() : 0;
     trap_set_irq_handler(IRQ_MTI, mti_handler);
     mti_count = 0;
     irq_off();
@@ -201,6 +202,7 @@ static int t_wfi_wake(void)
     CHECK_EQ(mti_count, 0);
     if (suite_caps() & CAP_PMU) {
         CHECK_EQ(n, 1);                      /* one WFI covered the whole wait */
+        CHECK_EQ(pmu_idle_count(), idle0 + 1);   /* exactly one IDLE entry */
     }
     return TEST_PASS;
 }

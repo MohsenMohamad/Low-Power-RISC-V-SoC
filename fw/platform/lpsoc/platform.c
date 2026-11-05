@@ -44,6 +44,7 @@ void platform_exit(uint32_t code)
     uart_flush();
     (void)arch_irq_save();
     (void)arch_irq_mask_save(0);
+    pmu_set_wake_mask(0);
     pmu_set_mode(PMU_MODE_IDLE);
     for (;;) arch_wfi();        /* no wake source: stays clock gated */
 }

@@ -36,8 +36,23 @@ void pm_ctx_seal(pm_ctx_t *ctx)
     ctx->magic = CTX_MAGIC;
 }
 
+/* The PMU wakes the CPU only for sources in WAKE_MASK (doc/SOC_REGMAP.md):
+ * program it with exactly the sources enabled in mie, so a pending but
+ * disabled interrupt cannot wake the PMU while the core stays in WFI. */
+void pm_sync_wake_mask(void)
+{
+#if PLATFORM_HAS_SOC
+    uint32_t mie = arch_irq_wake_sources(), m = 0;
+    if (mie & (1u << IRQ_MEI)) m |= WAKE_MEIP;
+    if (mie & (1u << IRQ_MTI)) m |= WAKE_MTIP;
+    if (mie & (1u << IRQ_MSI)) m |= WAKE_MSIP;
+    pmu_set_wake_mask(m);
+#endif
+}
+
 void pm_wfi(void)
 {
+    pm_sync_wake_mask();
     arch_wfi();
 }
 
@@ -66,6 +81,7 @@ int pm_suspend(enum pm_state st, uint32_t flags)
         if (flags & PM_F_BAD_CRC) ctx->crc ^= 1u;
         pmu_write(PMU_SCRATCH0, CTX_ADDR);
         pmu_write(PMU_SCRATCH1, RESUME_MAGIC);
+        pm_sync_wake_mask();
         r = pm_clean_and_wfi((st == PM_SLEEP ? PMU_MODE_SLEEP : PMU_MODE_DEEP) | PMU_CTRL_LP_EN,
                              (flags & PM_F_NO_CLEAN) ? 0u : 1u);
         /* Still powered: no power-down happened. */

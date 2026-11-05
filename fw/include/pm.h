@@ -22,7 +22,9 @@ enum pm_result {
 #define PM_F_NO_CLEAN   (1u << 0)   /* skip the D-cache clean (PMU must refuse) */
 #define PM_F_BAD_CRC    (1u << 1)   /* store a wrong context CRC (ROM must reject) */
 
-/* WFI with the PMU wake setup for the sources enabled in mie. */
+/* PMU.WAKE_MASK = the wake sources enabled in mie. */
+void pm_sync_wake_mask(void);
+/* WFI with the PMU wake mask set from mie. */
 void pm_wfi(void);
 /* Clock-gated wait (PMU IDLE) for an interrupt enabled in mie. */
 int  pm_idle(void);

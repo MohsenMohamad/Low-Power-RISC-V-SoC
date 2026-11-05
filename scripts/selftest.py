@@ -185,29 +185,38 @@ def t_runners(d):
                 "seed 1: FAIL")
 
 
+PMU_MUTANTS = [
+    # voltage not raised before a speed-up: SVA a_vsel_sufficient / a_dvfs_vup,
+    # reference model
+    ("vsel-mutant", "          vsel_q   <= vup_level;\n", "          vsel_q   <= vsel_q;\n"),
+    # wake mask ignored (stage-1 open item 3): SVA a_wake_masked, the bench's
+    # masked-noise check
+    ("wake-mask-mutant", "  assign wake     = |(wake_src & wake_mask_q);\n", "  assign wake     = |wake_src;\n"),
+]
+
+
 def t_pmu(d, verilator):
-    # PMU mutant: voltage not raised before a speed-up. The unit bench (SVA
-    # a_vsel_sufficient / reference model) and the formal proof must fail.
+    # PMU mutants: the unit bench and the formal proof must both fail.
     src = open(os.path.join(ROOT, "rtl/aon/pmu.sv")).read()
-    old = "          vsel_q   <= vup_level;\n"
-    if old not in src:
-        record("tb_pmu/vsel-mutant", False, "(mutant text not found in rtl/aon/pmu.sv)")
-        record("formal_pmu/vsel-mutant", False, "(mutant text not found)")
-        return
-    mut = src.replace(old, "          vsel_q   <= vsel_q;\n", 1)
-    t = f"{d}/pmu"
-    w(f"{t}/rtl/aon/pmu.sv", mut)
-    shutil.copytree(os.path.join(ROOT, "rtl/include"), f"{t}/rtl/include", dirs_exist_ok=True)
-    rc, out = sh(f"{verilator} --binary --timing --timescale 1ns/1ps -j 0 -DSVA_ON --assert -Wno-fatal -Wno-WIDTH "
-                 f"-Wno-lint -Wno-style -Wno-MULTIDRIVEN --top-module tb_pmu -Mdir {t}/obj -o Vtb_pmu "
-                 f"-I{t}/rtl/include {t}/rtl/aon/pmu.sv {ROOT}/sim/pmu/tb_pmu.sv")
-    if rc:
-        record("tb_pmu/vsel-mutant", False, "(mutant bench did not build)\n" + out[-400:])
-    else:
-        # caught by any PMU SVA (a_vsel_sufficient / a_dvfs_vup) or the reference model
-        expect_fail("tb_pmu/vsel-mutant", f"{t}/obj/Vtb_pmu +episodes=200", "Assertion failed in tb_pmu", cwd=t)
-    shutil.copytree(os.path.join(ROOT, "formal"), f"{t}/formal", dirs_exist_ok=True)
-    expect_fail("formal_pmu/vsel-mutant", f"sby -f -d {t}/sby_prove pmu.sby prove", "Assert failed", cwd=f"{t}/formal")
+    for name, old, new in PMU_MUTANTS:
+        if old not in src:
+            record(f"tb_pmu/{name}", False, "(mutant text not found in rtl/aon/pmu.sv)")
+            record(f"formal_pmu/{name}", False, "(mutant text not found)")
+            continue
+        t = f"{d}/pmu-{name}"
+        w(f"{t}/rtl/aon/pmu.sv", src.replace(old, new, 1))
+        shutil.copytree(os.path.join(ROOT, "rtl/include"), f"{t}/rtl/include", dirs_exist_ok=True)
+        rc, out = sh(f"{verilator} --binary --timing --timescale 1ns/1ps -j 0 -DSVA_ON --assert -Wno-fatal -Wno-WIDTH "
+                     f"-Wno-lint -Wno-style -Wno-MULTIDRIVEN --top-module tb_pmu -Mdir {t}/obj -o Vtb_pmu "
+                     f"-I{t}/rtl/include {t}/rtl/aon/pmu.sv {ROOT}/sim/pmu/tb_pmu.sv")
+        if rc:
+            record(f"tb_pmu/{name}", False, "(mutant bench did not build)\n" + out[-400:])
+        else:
+            # caught by a PMU SVA or a bench check / the reference model
+            expect_fail(f"tb_pmu/{name}", f"{t}/obj/Vtb_pmu +episodes=200", "Assertion failed in", cwd=t)
+        shutil.copytree(os.path.join(ROOT, "formal"), f"{t}/formal", dirs_exist_ok=True)
+        expect_fail(f"formal_pmu/{name}", f"sby -f -d {t}/sby_prove pmu.sby prove", "Assert failed",
+                    cwd=f"{t}/formal")
 
 
 def main():

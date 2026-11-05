@@ -153,6 +153,7 @@ static void env_reset(void)
         pmu_set_mode(PMU_MODE_IDLE);
         pmu_write(PMU_IRQ_EN, 0);
         pmu_write(PMU_SCRATCH1, 0);
+        pmu_set_wake_mask(WAKE_ALL);
         pmu_clear_status(PMU_ST_W1C_ALL);
     }
     if ((caps & CAP_DVFS) && pmu_cur_op() != PMU_RESET_OP) (void)pm_set_opp(PMU_RESET_OP);

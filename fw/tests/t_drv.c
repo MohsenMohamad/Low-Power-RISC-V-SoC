@@ -105,6 +105,14 @@ static int t_pmu(void)
     CHECK_EQ(pmu_read(PMU_DVFS), PMU_RESET_OP);
     CHECK_EQ(pmu_read(PMU_VSEL), PMU_RESET_OP);
     CHECK_EQ(pmu_read(PMU_IRQ_EN), 0);
+    CHECK_EQ(pmu_wake_mask(), WAKE_ALL);     /* suite baseline = reset value */
+    pmu_set_wake_mask(WAKE_MTIP);
+    CHECK_EQ(pmu_wake_mask(), WAKE_MTIP);
+    pmu_write(PMU_WAKE_MASK, 0xFFFFFFFFu);
+    CHECK_EQ(pmu_wake_mask(), WAKE_ALL);     /* bits 31:3 read 0 */
+    uint32_t ic = pmu_idle_count();
+    timer_delay(20);
+    CHECK_EQ(pmu_idle_count(), ic);          /* only counts IDLE entries */
     pmu_write(PMU_IRQ_EN, 1);
     CHECK_EQ(pmu_read(PMU_IRQ_EN), 1);
     pmu_write(PMU_IRQ_EN, 0);
@@ -208,6 +216,9 @@ static int t_bus_errors(void)
     CHECK_EQ(pmu_sleep_count(), cnt);
     CHECK(sw_faults(PMU_BASE + PMU_WAKE_CAUSE, 7));
     CHECK(sw_faults(PMU_BASE + PMU_VSEL, 0));
+    uint32_t ic = pmu_idle_count();
+    CHECK(sw_faults(PMU_BASE + PMU_IDLE_CNT, 0));
+    CHECK_EQ(pmu_idle_count(), ic);
     CHECK_EQ(pmu_read(PMU_VSEL), pmu_cur_op());
     CHECK(sw_faults(INTC_BASE + INTC_PENDING, 0xFF));
     CHECK(sw_faults(INTC_BASE + INTC_ACTIVE, 0xFF));

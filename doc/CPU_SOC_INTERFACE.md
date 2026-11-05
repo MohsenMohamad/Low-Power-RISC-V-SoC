@@ -124,9 +124,11 @@ Rules:
 6. `core_sleep` = WFI retired, drained, both caches and the AXI mux idle, and
    no interrupt pending and enabled in `mie`. WFI follows the RISC-V
    privileged specification: it ends on an interrupt that is pending and
-   enabled in `mie`, regardless of `mstatus.MIE`. The PMU wakes on any of
-   `meip | mtip | msip`; firmware enables in `mie` every source it uses as a
-   wake source.
+   enabled in `mie`, regardless of `mstatus.MIE`. The PMU wakes on
+   `meip | mtip | msip` masked by its WAKE_MASK register; firmware enables in
+   `mie` every source it uses as a wake source and writes the same set to
+   WAKE_MASK (doc/SOC_REGMAP.md), so a pending interrupt that cannot end WFI
+   does not wake the PMU either (`pmu.a_wake_masked`, `pmu.a_masked_holds`).
 
 ## `cache_clean` and cache maintenance completion (W35)
 

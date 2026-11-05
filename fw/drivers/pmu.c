@@ -43,3 +43,18 @@ uint32_t pmu_wake_cause(void)
 {
     return PMU(PMU_WAKE_CAUSE);
 }
+
+void pmu_set_wake_mask(uint32_t mask)
+{
+    PMU(PMU_WAKE_MASK) = mask & WAKE_ALL;
+}
+
+uint32_t pmu_wake_mask(void)
+{
+    return PMU(PMU_WAKE_MASK);
+}
+
+uint32_t pmu_idle_count(void)
+{
+    return PMU(PMU_IDLE_CNT);
+}

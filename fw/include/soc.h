@@ -78,6 +78,8 @@
 #define PMU_WAKE_CAUSE      0x18
 #define PMU_SLEEP_CNT       0x1C
 #define PMU_VSEL            0x20
+#define PMU_WAKE_MASK       0x24    /* [0] meip [1] mtip [2] msip, reset 0x7 */
+#define PMU_IDLE_CNT        0x28    /* completed IDLE entries */
 
 #define PMU_MODE_IDLE       _U(0)
 #define PMU_MODE_SLEEP      _U(1)
@@ -96,10 +98,11 @@
 #define PMU_STATE_RUN       0
 #define PMU_STATE_IDLE      3
 
-/* WAKE_CAUSE bits */
+/* WAKE_CAUSE and WAKE_MASK bits */
 #define WAKE_MEIP           (_U(1) << 0)
 #define WAKE_MTIP           (_U(1) << 1)
 #define WAKE_MSIP           (_U(1) << 2)
+#define WAKE_ALL            (WAKE_MEIP | WAKE_MTIP | WAKE_MSIP)
 
 /* Operating points: OP0 slowest / lowest voltage .. OP2 fastest (reset). */
 #define PMU_NUM_OPP         3

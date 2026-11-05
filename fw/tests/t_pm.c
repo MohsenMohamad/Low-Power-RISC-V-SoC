@@ -81,17 +81,19 @@ static int t_idle(void)
 {
     uint32_t op = pmu_cur_op();
     static const uint32_t per[PMU_NUM_OPP] = {OP0_PERIOD_PS, OP1_PERIOD_PS, OP2_PERIOD_PS};
+    uint32_t ic0 = pmu_idle_count();
     uint64_t m0 = timer_now();
     uint64_t c0 = arch_cycles();
-    int r = sleep_for(PM_IDLE, 3000);
+    int r = sleep_for(PM_IDLE, 8000);
     uint64_t c1 = arch_cycles();
     uint64_t m1 = timer_now();
     uint64_t running = (m1 - m0) * AON_PERIOD_PS / per[op];
     printf_("    %u ticks idle: %u cpu cycles (%u if not gated)\n",
             (unsigned)(m1 - m0), (unsigned)(c1 - c0), (unsigned)running);
     CHECK_EQ(r, PM_WOKE);
-    CHECK(m1 >= m0 + 3000);
+    CHECK(m1 >= m0 + 8000);
     CHECK(pmu_wake_cause() & WAKE_MTIP);
+    CHECK_EQ(pmu_idle_count(), ic0 + 1);
     CHECK(c1 - c0 < running / 4);           /* clock was gated */
     return TEST_PASS;
 }
@@ -437,3 +439,43 @@ static int t_coverage(void)
     return TEST_PASS;
 }
 TEST(61, "pm_state_opp_coverage", CAP_PMU | CAP_DVFS | CAP_BOOTROM | CAP_CLINT, t_coverage);
+
+/* ------------------------------------------------ PMU wake mask */
+/* A pending interrupt that firmware did not enable in mie must not wake the
+ * PMU (stage-1 open item 3). Here MTIP is pending but only MEIE is enabled;
+ * the wake timer (intc -> MEIP) ends the wait. Without a wake mask the PMU
+ * woke on MTIP, found the core still in WFI and entered IDLE again,
+ * repeatedly: the clock ran for most of the wait. */
+static int t_wake_mask(void)
+{
+    uint32_t op = pmu_cur_op();
+    static const uint32_t per[PMU_NUM_OPP] = {OP0_PERIOD_PS, OP1_PERIOD_PS, OP2_PERIOD_PS};
+    uint32_t mie = arch_irq_mask_save(1u << IRQ_MEI);
+    intc_set_enabled(IRQ_WTIMER);
+    timer_set_cmp(timer_now());              /* MTIP pending, MTIE off */
+    timer_delay(4);
+    CHECK(csr_read(mip) & MIP_MTIP);
+    uint32_t ic0 = pmu_idle_count();
+    uint64_t m0 = timer_now(), c0 = arch_cycles();
+    wtimer_start(8000, 0);
+    int r = pm_idle();
+    uint64_t c1 = arch_cycles(), m1 = timer_now();
+    uint32_t wc = pmu_wake_cause();
+    uint32_t mask = pmu_wake_mask();
+    uint32_t ic1 = pmu_idle_count();
+    wtimer_stop();
+    intc_set_enabled(0);
+    timer_cancel();
+    arch_irq_mask_restore(mie);
+    uint64_t running = (m1 - m0) * AON_PERIOD_PS / per[op];
+    printf_("    %u ticks in WFI with MTIP pending (masked): %u cpu cycles (%u if not gated), %u IDLE entries\n",
+            (unsigned)(m1 - m0), (unsigned)(c1 - c0), (unsigned)running, (unsigned)(ic1 - ic0));
+    CHECK_EQ(r, PM_WOKE);
+    CHECK_EQ(mask, WAKE_MEIP);               /* pm_wfi programmed it from mie */
+    CHECK_EQ(ic1 - ic0, 1);                  /* no repeated wake / IDLE cycle */
+    CHECK(m1 - m0 >= 8000);
+    CHECK(wc & WAKE_MEIP);
+    CHECK(c1 - c0 < running / 4);            /* clock stayed gated */
+    return TEST_PASS;
+}
+TEST(48, "pm_wake_mask", CAP_PMU | CAP_CLINT | CAP_WTIMER | CAP_INTC, t_wake_mask);

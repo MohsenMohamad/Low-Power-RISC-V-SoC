@@ -59,6 +59,9 @@ void     pmu_clear_status(uint32_t w1c);
 uint32_t pmu_cur_op(void);
 uint32_t pmu_sleep_count(void);
 uint32_t pmu_wake_cause(void);
+void     pmu_set_wake_mask(uint32_t mask);   /* WAKE_MEIP | WAKE_MTIP | WAKE_MSIP */
+uint32_t pmu_wake_mask(void);
+uint32_t pmu_idle_count(void);
 
 /* ---------------- caches (drivers/cache.c, CSR mcachectl only) ----
  * D-cache clean and flush return 0, or -1 if mcachectl reported a
