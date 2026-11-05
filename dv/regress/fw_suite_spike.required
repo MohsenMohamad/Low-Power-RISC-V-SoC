@@ -1,0 +1,48 @@
+# Validation suite on Spike (PLATFORM=spike; --priv=M and --priv=MSU). Spike has RAM, a CLINT
+# and HTIF only: tests that need SoC peripherals must report SKIP (N/A) and nothing else.
+fw/1
+fw/2
+fw/3
+fw/10
+fw/11
+fw/12
+fw/13
+fw/14
+fw/15
+fw/16
+fw/20
+fw/21
+fw/22
+fw/25
+fw/26
+fw/40
+fw/71
+fw/suite-result
+fw/exit
+na fw/23  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/24  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/30  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/31  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/32  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/33  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/34  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/35  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/36  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/41  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/42  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/43  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/44  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/45  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/46  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/47  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/48  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/50  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/51  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/52  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/60  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/61  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/70  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/72  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/73  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/75  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/76  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)

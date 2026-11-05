@@ -119,7 +119,7 @@ static uint32_t finish(void)
     printf_("SUITE DONE pass=%u fail=%u skip=%u signature=0x%08x\n",
             (unsigned)s->pass, (unsigned)s->fail, (unsigned)s->skip, (unsigned)sig);
     if (s->fail) {
-        puts_("FAILED:");
+        puts_("failed tests:");
         for (unsigned i = 0; i < s->fail && i < 8; i++) printf_(" %u", (unsigned)s->failed[i]);
         putch('\n');
     }

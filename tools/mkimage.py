@@ -2,9 +2,10 @@
 """Turn raw firmware binaries into loadable images.
 
   mkimage.py app <in.bin> <out.bin> <out.hex> --mem-base A --load-addr B
-      Patch the CRC-32 into the application image header (see
-      fw/include/handoff.h), check the header fields and write a word-wide
-      $readmemh file for the RAM model (addresses relative to --mem-base).
+      Check every image header field against doc/BOOT_ABI.md (exactly the
+      rules the boot ROM applies, so an image the ROM would reject is a build
+      error), patch the CRC-32 and write a word-wide $readmemh file for the RAM
+      model (addresses relative to --mem-base).
 
   mkimage.py rom <in.bin> <out.hex> --size N
       Check the size and write a $readmemh file for the ROM model.
@@ -28,21 +29,47 @@ def write_hex(path, data, word_offset):
             f.write("%08x\n" % struct.unpack_from("<I", data, i)[0])
 
 
+IMAGE_VERSION = 1
+RAM_SIZE = 0x20000          # doc/SPEC.md; the image may not run past the RAM
+APP_OFFSET = 0x1000         # doc/BOOT_ABI.md: image at RAM_BASE + 0x1000
+
+
+def check_header(magic, ver, load, size, entry, rsvd0, rsvd1, length, load_addr, mem_base):
+    """Return a list of rule violations (doc/BOOT_ABI.md "Application image")."""
+    errs = []
+    if magic != IMAGE_MAGIC:
+        errs.append("bad image magic 0x%08x" % magic)
+    if ver != IMAGE_VERSION:
+        errs.append("header version %d != %d" % (ver, IMAGE_VERSION))
+    if load != load_addr:
+        errs.append("load address 0x%08x != 0x%08x" % (load, load_addr))
+    if load != mem_base + APP_OFFSET:
+        errs.append("load address 0x%08x is not RAM base + 0x%x" % (load, APP_OFFSET))
+    if size != length:
+        errs.append("header size %d != binary size %d" % (size, length))
+    if size % 4:
+        errs.append("image size %d is not a multiple of 4" % size)
+    if size < HDR_SIZE or size > RAM_SIZE - APP_OFFSET:
+        errs.append("image size %d outside [%d, %d]" % (size, HDR_SIZE, RAM_SIZE - APP_OFFSET))
+    if not (load + HDR_SIZE <= entry < load + size):
+        errs.append("entry 0x%08x outside the image body" % entry)
+    if entry % 4:
+        errs.append("entry 0x%08x is not 4-byte aligned" % entry)
+    if rsvd0 or rsvd1:
+        errs.append("reserved header words are not 0")
+    return errs
+
+
 def cmd_app(a):
     data = bytearray(open(a.input, "rb").read())
     if len(data) < HDR_SIZE:
         sys.exit("image too small")
-    magic, ver, load, size, entry, _crc, _r0, _r1 = struct.unpack_from(HDR_FMT, data, 0)
-    if magic != IMAGE_MAGIC:
-        sys.exit("bad image magic 0x%08x" % magic)
-    if load != a.load_addr:
-        sys.exit("load address 0x%08x != 0x%08x" % (load, a.load_addr))
+    magic, ver, load, size, entry, _crc, r0, r1 = struct.unpack_from(HDR_FMT, data, 0)
     if len(data) < size <= len(data) + 16:
         data += b"\0" * (size - len(data))      # alignment padding at the end
-    if size != len(data):
-        sys.exit("header size %d != binary size %d" % (size, len(data)))
-    if not (load <= entry < load + size):
-        sys.exit("entry 0x%08x outside image" % entry)
+    errs = check_header(magic, ver, load, size, entry, r0, r1, len(data), a.load_addr, a.mem_base)
+    if errs:
+        sys.exit("mkimage: invalid image %s: %s" % (a.input, "; ".join(errs)))
     crc = zlib.crc32(bytes(data[HDR_SIZE:])) & 0xFFFFFFFF
     struct.pack_into("<I", data, 20, crc)
     open(a.output, "wb").write(data)

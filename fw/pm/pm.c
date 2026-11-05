@@ -56,13 +56,20 @@ void pm_wfi(void)
     arch_wfi();
 }
 
+/* PM_WOKE only if the PMU actually completed an IDLE entry (IDLE_CNT
+ * advanced): a WFI that falls through because an enabled interrupt is already
+ * pending is not a transition and is reported as PM_ABORTED (doc/SPEC.md). */
 int pm_idle(void)
 {
 #if PLATFORM_HAS_SOC
     pmu_set_mode(PMU_MODE_IDLE);
-#endif
+    uint32_t n0 = pmu_idle_count();
+    pm_wfi();
+    return pmu_idle_count() != n0 ? PM_WOKE : PM_ABORTED;
+#else
     pm_wfi();
     return PM_WOKE;
+#endif
 }
 
 #if PLATFORM_HAS_SOC

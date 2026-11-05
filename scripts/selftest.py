@@ -185,6 +185,78 @@ def t_runners(d):
                 "seed 1: FAIL")
 
 
+def t_fw(d):
+    """Firmware flow: tools/fw_results.py + check_results.py (the stage-1
+    checker) and tools/mkimage.py must reject wrong input."""
+    fwd = f"{d}/fw"
+    req = w(f"{fwd}/req.txt", "fw/1\nfw/2\nna fw/3  # not on this platform\nfw/suite-result\nfw/exit\n")
+    tail = "SUITE DONE pass=2 fail=0 skip=1 signature=0x600d0002\nSUITE RESULT: PASS\nPASS\n"
+
+    def chk(cid, log, expect_ok, reason=""):
+        lp = w(f"{fwd}/{cid}.log", log)
+        rp = f"{fwd}/{cid}.json"
+        cmd = (f"{PY} tools/fw_results.py --log {lp} --out {rp} && "
+               f"{PY} scripts/check_results.py --name {cid} --results {rp} --required {req}")
+        if expect_ok:
+            expect_pass(f"fw_results/{cid}", cmd)
+        else:
+            expect_fail(f"fw_results/{cid}", cmd, reason)
+
+    good = "[TEST   1] a PASS\n[TEST   2] b PASS\n[TEST   3] c SKIP (needs x)\n"
+    chk("good", good + tail, True)
+    chk("good-soc-prefix", "".join("[uart] " + l + "\n" for l in (good + tail).splitlines()), True)
+    # the firmware branch's parser accepted both of these (stage 2 report)
+    chk("unknown-id-with-missing", "[TEST   1] a PASS\n[TEST 999] x PASS\n[TEST   3] c SKIP\n" + tail, False,
+        "required test 'fw/2' missing")
+    chk("unknown-id", good + "[TEST  42] x PASS\n" + tail, False, "unknown test ID 'fw/42'")
+    chk("pass-after-fail", "[TEST   1] a FAIL (code 7)\n[TEST   1] a PASS\n[TEST   2] b PASS\n"
+        "[TEST   3] c SKIP\n" + tail, False, "'fw/1': FAIL")
+    chk("skip-of-required", "[TEST   1] a PASS\n[TEST   2] b SKIP (needs y)\n[TEST   3] c SKIP\n" + tail, False,
+        "'fw/2': N/A")
+    chk("na-test-ran", "[TEST   1] a PASS\n[TEST   2] b PASS\n[TEST   3] c PASS\n" + tail, False,
+        "declared not applicable but reported")
+    chk("no-exit-line", good + "SUITE RESULT: PASS\n", False, "required test 'fw/exit' missing")
+    chk("exit-fail", good + "SUITE RESULT: PASS\nFAIL 0xbad00001\n", False, "'fw/exit': FAIL")
+    chk("suite-fail", good + "SUITE RESULT: FAIL\nPASS\n", False, "'fw/suite-result': FAIL")
+    chk("truncated", "[TEST   1] a PASS\n", False, "missing")
+
+    # image builder: every header rule of doc/BOOT_ABI.md
+    import struct
+
+    def img(cid, entry=0x10001020, ver=1, load=0x10001000, rsvd=0, extra=0, expect_ok=False, reason=""):
+        body = b"\x13\x00\x00\x00" * 8
+        size = 32 + len(body) + extra
+        hdr = struct.pack("<8I", 0x5041504C, ver, load, size, entry, 0, rsvd, 0)
+        raw = f"{fwd}/{cid}.raw"
+        open(raw, "wb").write(hdr + body + b"\0" * extra)
+        cmd = (f"{PY} tools/mkimage.py app {raw} {fwd}/{cid}.img {fwd}/{cid}.hex "
+               f"--mem-base 0x10000000 --load-addr 0x10001000")
+        if expect_ok:
+            expect_pass(f"mkimage/{cid}", cmd)
+        else:
+            expect_fail(f"mkimage/{cid}", cmd, reason)
+
+    img("good", expect_ok=True)
+    img("unaligned-entry", entry=0x10001022, reason="not 4-byte aligned")
+    img("entry-in-header", entry=0x10001004, reason="outside the image body")
+    img("entry-past-end", entry=0x10001040, reason="outside the image body")
+    img("bad-version", ver=2, reason="header version")
+    img("bad-load-address", load=0x10002000, reason="load address")
+    img("reserved-nonzero", rsvd=1, reason="reserved header words")
+    img("size-not-word-multiple", extra=2, reason="multiple of 4")
+
+    # monitor session checker
+    spec = w(f"{fwd}/mon.txt", "< banner\n> peek x\n< ^0x1: 0x2$\n! ERR\n")
+    good_log = w(f"{fwd}/mon_good.log", "banner\nmon> peek x\n0x1: 0x2\nmon> ")
+    bad_log = w(f"{fwd}/mon_bad.log", "banner\nmon> peek x\nERR fault 0x1\nmon> ")
+    short_log = w(f"{fwd}/mon_short.log", "banner\n")
+    expect_pass("monitor_check/good", f"{PY} tools/monitor_check.py check {spec} {good_log}")
+    expect_fail("monitor_check/missing-and-denied", f"{PY} tools/monitor_check.py check {spec} {bad_log}",
+                "unexpected /ERR/")
+    expect_fail("monitor_check/session-ended-early", f"{PY} tools/monitor_check.py check {spec} {short_log}",
+                "no output")
+
+
 PMU_MUTANTS = [
     # voltage not raised before a speed-up: SVA a_vsel_sufficient / a_dvfs_vup,
     # reference model
@@ -230,6 +302,7 @@ def main():
     os.makedirs(d)
     groups = [("check_results", lambda: t_check_results(d)), ("check_soc_cov", lambda: t_check_soc_cov(d)),
               ("cov_report", lambda: t_cov_report(d, os.path.abspath(a.build))), ("runners", lambda: t_runners(d)),
+              ("fw", lambda: t_fw(d)),
               ("pmu", lambda: t_pmu(d, a.verilator)), ("mutation", lambda: t_mutation(d, a.verilator))]
     for name, fn in groups:
         try:
