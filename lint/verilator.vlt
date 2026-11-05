@@ -1,0 +1,9 @@
+`verilator_config
+// Third-party stand-in core: not linted (it will be replaced by the in-house core).
+lint_off -file "*third_party/picorv32/*"
+lint_off -rule DECLFILENAME -file "*third_party/*"
+// PicoRV32 samples its reset synchronously while the rest of the design uses
+// asynchronous-assert/synchronous-deassert resets; the reset comes from a
+// reset synchronizer so both usages are safe.
+lint_off -rule SYNCASYNCNET -file "*rtl/soc/soc_top.sv" -match "*cpu_rst_n*"
+lint_off -rule SYNCASYNCNET -file "*rtl/tech/tech_sync.sv" -match "*u_cpu_rst*"

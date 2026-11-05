@@ -1,0 +1,5 @@
+`verilator_config
+// Only used when assertions are compiled in (SVA_ON): the asynchronous resets
+// also appear in "disable iff" clauses, which Verilator reports as a
+// synchronous use of the reset net.
+lint_off -rule SYNCASYNCNET
