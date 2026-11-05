@@ -62,7 +62,7 @@ module tb_wdt;
   mst_e        m_st = M_RUN;
   bit          m_en, m_bark_en, m_rst_en, m_pause = 1, m_lock;
   logic [31:0] m_load = '1, m_bark = 0, m_count = '1, m_rst_cnt = 0;
-  bit          m_bark_st, m_bite_st, m_bad;
+  bit          m_bark_st, m_bite_st, m_bad, m_rst_dis;
   int unsigned m_tmr;
   logic [31:0] exp_rd[$];          // expected data of reads in flight
   int unsigned n_bites, n_timeouts, n_resets, n_paused;
@@ -106,8 +106,12 @@ module tb_wdt;
             else m_st = M_RUN;
           end else m_tmr++;
         end
-        M_RST: if (m_tmr == RST_PULSE - 1) begin m_st = M_RUN; m_tmr = 0; end else m_tmr++;
+        M_RST: if (m_tmr == RST_PULSE - 1) begin
+                 m_st = M_RUN; m_tmr = 0;
+                 if (!m_lock) m_rst_dis = 1;      // EN clears after the reset request
+               end else m_tmr++;
       endcase
+      if (m_rst_dis) begin m_en = 0; m_rst_dis = 0; end
       // configuration writes take effect after this edge
       if (wr_ok) begin
         case (a)
@@ -278,7 +282,10 @@ module tb_wdt;
   a_pause:      assert property (dut.en_q && dut.pause_lp_q && pwr_state inside {PS_SLEEP, PS_DSLEEP} &&
                                  !dut.kick && !dut.en_rise && dut.st_q == 2'd0 |=> dut.count_q == $past(dut.count_q));
   a_lock:       assert property (dut.lock_q |=> dut.lock_q);
+  a_rst_stops:  assert property ($fell(rst_req) && !dut.lock_q |-> !dut.en_q);
+  a_rst_locked: assert property ($fell(rst_req) && dut.lock_q |-> dut.en_q);
   a_lock_cfg:   assert property (dut.lock_q |=> $stable(dut.load_q) && $stable(dut.bark_q) && $stable(dut.en_q));
+  c_rst_stop:   cover property ($fell(rst_req) && !dut.lock_q);
   a_irq:        assert property (irq == (dut.bark_st_q && dut.bark_en_q));
   c_bite_ack:   cover property (wdt_evt && wdt_ack);
   c_bite_to:    cover property (wdt_evt && dut.tmr_q == 8'(LOG_TIMEOUT - 1) && !wdt_ack);

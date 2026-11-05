@@ -171,7 +171,7 @@ module dbg_evcnt
       end
       // 64-bit coherent read: LO read latches HI
       if (reg_re && reg_raddr >= A_T0 && reg_raddr < A_PSTATE && !reg_raddr[2])
-        {hi_shadow_q, lo_shadow_q} <= t_q[reg_raddr[4:3]];
+        {hi_shadow_q, lo_shadow_q} <= t_q[2'((reg_raddr - A_T0) >> 3)];
     end
   end
 

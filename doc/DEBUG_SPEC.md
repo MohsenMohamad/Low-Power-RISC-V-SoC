@@ -331,8 +331,11 @@ Bite sequence when `COUNT` reaches 0 with `EN=1`:
 3. If `RST_EN=1`, `cpu_rst_req_o` is high for 16 clk_aon cycles and `RST_CNT`
    increments. The reset request is never raised before the bite was logged
    (SVA-checked).
-4. `COUNT` reloads from `LOAD` and counting continues (the watchdog is AON, so
-   it keeps running across the PD_CPU reset; firmware reconfigures it at boot).
+4. `COUNT` reloads from `LOAD`. After a reset request `EN` is cleared, so the
+   rebooting software (boot ROM included, which does not know the watchdog)
+   starts with the watchdog stopped and re-arms it; with `LOCK=1` the watchdog
+   keeps running instead and the boot code must kick it. Without `RST_EN`
+   (log only) counting continues.
 
 ### 8.4 PMU stand-in used by the platform simulation (testbench only)
 

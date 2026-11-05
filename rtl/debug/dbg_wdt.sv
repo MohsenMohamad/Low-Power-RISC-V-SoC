@@ -3,7 +3,7 @@
 // Down-counter in clk_aon. Bark (pre-timeout interrupt) when COUNT <= BARK.
 // Bite at 0: the hang is first logged in the error log (wdt_evt_o until
 // wdt_evt_ack_i, or LOG_TIMEOUT cycles), then a PD_CPU reset is requested on
-// cpu_rst_req_o for RST_PULSE cycles.
+// cpu_rst_req_o for RST_PULSE cycles; then EN clears unless LOCK is set.
 module dbg_wdt
   import dbg_pkg::*;
 #(
@@ -136,7 +136,12 @@ module dbg_wdt
         end
         W_RST: begin
           tmr_q <= tmr_q + 8'd1;
-          if (tmr_q == 8'(RST_PULSE - 1)) begin st_q <= W_RUN; tmr_q <= '0; end
+          if (tmr_q == 8'(RST_PULSE - 1)) begin
+            st_q <= W_RUN; tmr_q <= '0;
+            // the rebooting software re-arms the watchdog; a locked one keeps
+            // running (its boot code must kick it)
+            if (!lock_q) en_q <= 1'b0;
+          end
         end
         default: st_q <= W_RUN;
       endcase
