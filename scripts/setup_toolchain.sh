@@ -17,8 +17,11 @@
 #   Icarus Verilog    12.0     Ubuntu 24.04 iverilog 12.0-2build2
 #   Yosys             0.33     Ubuntu 24.04 yosys 0.33-5build2
 #   SymbiYosys        tag yosys-0.33 (85dd50b92a3acf170954a06f20f49e2162ce5273)
-#   Z3                5.3.3    PyPI z3-solver==5.3.3.0 (yosys-smtbmc and Verilator randomize();
-#                     Ubuntu's 4.8.12 hangs in yosys-smtbmc)
+#   Z3                5.3.3    PyPI z3-solver==5.3.3.0 in the venv Z3_VENV, its z3 binary linked
+#                     into TOOLS_BIN (yosys-smtbmc and Verilator randomize(); Ubuntu's
+#                     4.8.12 hangs in yosys-smtbmc). Not "pip install --prefix /usr/local":
+#                     Ubuntu's pip (Debian sysconfig scheme posix_local) then installs the
+#                     scripts into /usr/local/local/bin, off PATH.
 #   sv2v              v0.0.13  release binary (SystemVerilog -> Verilog for Yosys 0.33 / Icarus)
 #   riscv-arch-test   3.9.1    git submodule third_party/riscv-arch-test (eb66181)
 #   Python            3.10 or newer
@@ -40,6 +43,7 @@ ARCH_TEST_REV=eb66181dd27ff7847e2c3a010705b13490b0bf75
 
 VERILATOR_PREFIX=${VERILATOR_PREFIX:-/opt/verilator-${VERILATOR_TAG#v}}
 SPIKE_PREFIX=${SPIKE_PREFIX:-/opt/spike}
+Z3_VENV=${Z3_VENV:-/opt/z3-${Z3_PIP%.0}}
 TOOLS_BIN=${TOOLS_BIN:-/usr/local/bin}
 SRC=${SRC:-/opt/src}
 JOBS=${JOBS:-$(nproc)}
@@ -50,6 +54,12 @@ sudo_() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
 env_lines() {
   echo "export PATH=$VERILATOR_PREFIX/bin:$SPIKE_PREFIX/bin:$TOOLS_BIN:\$PATH"
   echo "export SPIKE_PREFIX=$SPIKE_PREFIX"
+}
+
+# Compiled-in SMT solver of the Verilator on PATH ("Summary of configuration").
+verilator_solver() {
+  verilator -V 2>/dev/null | awk '/^Summary of configuration/ {s = 1} /^Environment/ {s = 0}
+    s && /VERILATOR_SOLVER/ {sub(/^[^=]*= */, ""); print; exit}'
 }
 
 # ------------------------------------------------------------------ check
@@ -66,6 +76,9 @@ check() {
   [ "$v" = "$BINUTILS_VER" ] && ok riscv-binutils "$v" || fail riscv-binutils "${v:-absent}" "need $BINUTILS_VER"
   v=$(ver verilator --version | awk '{print $2}')
   [ "v$v" = "$VERILATOR_TAG" ] && ok verilator "$v" || fail verilator "${v:-absent}" "need $VERILATOR_TAG"
+  # randomize() needs the SMT solver Verilator was configured with
+  v=$(verilator_solver)
+  [ "$v" = "z3 --in" ] && ok verilator-solver "$v" || fail verilator-solver "${v:-none}" "rebuild Verilator with z3 on PATH"
   if [ -f "$SPIKE_PREFIX/.rev" ] && [ "$(cat "$SPIKE_PREFIX/.rev")" = "$SPIKE_REV" ] && [ -x "$SPIKE_PREFIX/bin/spike" ]; then
     ok spike "${SPIKE_REV:0:12}"
   else
@@ -81,7 +94,7 @@ check() {
     fail symbiyosys "$(cat "$TOOLS_BIN/.sby_rev" 2>/dev/null || echo absent)" "need $SBY_TAG ($SBY_REV)"
   fi
   v=$(ver z3 --version | awk '{print $3}')
-  [ "$v" = "${Z3_PIP%.0}" ] && ok z3 "$v ($(command -v z3))" || fail z3 "${v:-absent}" "need ${Z3_PIP%.0} first on PATH"
+  [ "$v" = "${Z3_PIP%.0}" ] && ok z3 "$v ($(command -v z3))" || fail z3 "${v:-absent} ($(command -v z3 || echo 'not on PATH'))" "need ${Z3_PIP%.0} first on PATH"
   v=$(ver sv2v --version | awk '{print $2}')
   [ "$v" = "$SV2V_TAG" ] && ok sv2v "$v" || fail sv2v "${v:-absent}" "need $SV2V_TAG"
   v=$(git -C "$ROOT/third_party/riscv-arch-test" rev-parse HEAD 2>/dev/null || true)
@@ -96,18 +109,26 @@ check() {
 do_install() {
   sudo_ apt-get update
   sudo_ env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential git python3 python3-pip autoconf bison flex help2man libfl-dev ccache curl unzip \
+    build-essential git python3 python3-pip python3-venv autoconf bison flex help2man libfl-dev ccache curl unzip \
     device-tree-compiler libboost-regex-dev libboost-system-dev \
     "gcc-riscv64-unknown-elf=$APT_GCC" "binutils-riscv64-unknown-elf=$APT_BINUTILS" \
     "iverilog=$APT_IVERILOG" "yosys=$APT_YOSYS"
   sudo_ mkdir -p "$SRC" "$TOOLS_BIN"
 
-  # Z3 (PyPI build; first on PATH via TOOLS_BIN)
-  sudo_ python3 -m pip install --break-system-packages --prefix /usr/local "z3-solver==$Z3_PIP" \
-    || sudo_ python3 -m pip install --prefix /usr/local "z3-solver==$Z3_PIP"
+  # Z3 (PyPI build in its own venv; the binary is linked first on PATH via
+  # TOOLS_BIN). Installed before Verilator, whose configure looks for z3.
+  if ! "$Z3_VENV/bin/z3" --version 2>/dev/null | grep -q " ${Z3_PIP%.0} "; then
+    sudo_ rm -rf "$Z3_VENV"
+    sudo_ python3 -m venv "$Z3_VENV"
+    sudo_ "$Z3_VENV/bin/python" -m pip install --no-cache-dir "z3-solver==$Z3_PIP"
+  fi
+  sudo_ ln -sf "$Z3_VENV/bin/z3" "$TOOLS_BIN/z3"
+  export PATH="$TOOLS_BIN:$PATH"
+  z3 --version | grep -q " ${Z3_PIP%.0} " || { echo "z3 on PATH ($(command -v z3)) is not ${Z3_PIP%.0}"; exit 1; }
 
-  # Verilator
-  if ! "$VERILATOR_PREFIX/bin/verilator" --version 2>/dev/null | grep -q " ${VERILATOR_TAG#v} "; then
+  # Verilator (rebuilt if a cached build was configured without the z3 solver)
+  if ! "$VERILATOR_PREFIX/bin/verilator" --version 2>/dev/null | grep -q " ${VERILATOR_TAG#v} " \
+     || [ "$(PATH="$VERILATOR_PREFIX/bin:$PATH" verilator_solver)" != "z3 --in" ]; then
     sudo_ rm -rf "$SRC/verilator-$VERILATOR_TAG"
     sudo_ git clone --depth 1 --branch "$VERILATOR_TAG" https://github.com/verilator/verilator.git "$SRC/verilator-$VERILATOR_TAG"
     (cd "$SRC/verilator-$VERILATOR_TAG" && sudo_ autoconf && sudo_ ./configure --prefix="$VERILATOR_PREFIX" \

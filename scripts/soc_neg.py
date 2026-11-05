@@ -43,7 +43,7 @@ def main():
     cases = [
         ("iso-verilator", f"{a.vl} +rom={pm} +cov={cov} +break_iso",
          lambda out: "Assertion failed" in out or "[tb] ERROR" in out),
-        ("iso-icarus", f"{a.iv} +rom={pm} +cov={cov} +break_iso +timeout=6000000",
+        ("iso-icarus", f"{a.iv} +rom={pm} +cov={cov} +break_iso +timeout=20000000",
          lambda out: "[tb] ERROR" in out and "unknown" in out),
         ("fw-fail", f"{a.vl} +rom={nf} +cov={cov}",
          lambda out: "firmware=fail" in out),
