@@ -69,7 +69,7 @@ const test_t *suite_find(uint32_t id)
 
 static const char *cap_names[16] = {
     "mcsr", "counters", "misalign", "accfault", 0, 0, 0, 0,
-    "clint", "intc", "uart", "pmu", "cache", "dvfs", "bootrom", "simctrl",
+    "mtimer", "intc", "uart", "pmu", "cache", "dvfs", "bootrom", "wtimer",
 };
 
 static void print_caps(uint32_t c)
@@ -133,35 +133,29 @@ static uint32_t finish(void)
 }
 
 /* Bring the platform back to a known baseline after every test, so that a
- * failing test cannot leave state behind that breaks the following ones. */
+ * failing test cannot leave state behind that breaks the following ones:
+ * interrupts off, timers stopped, intc disabled, PMU in IDLE mode at the
+ * reset operating point (OP2). */
 static void env_reset(void)
 {
     uint32_t caps = suite_caps();
     (void)arch_irq_save();
-    arch_irq_disable(IRQ_MTI);
-    arch_irq_disable(IRQ_MSI);
-    arch_irq_disable(IRQ_MEI);
+    (void)arch_irq_mask_save(0);
     trap_set_exc_handler(0);
     if (caps & CAP_CLINT) {
         timer_cancel();
         timer_set_msip(0);
     }
-    if (caps & CAP_INTC) {
-        intc_set_enabled(0);
-        intc_soft_clr(0xFFu);
-    }
+    if (caps & CAP_UART) uart_set_ie(0);
+    if (caps & CAP_WTIMER) wtimer_stop();
+    if (caps & CAP_INTC) intc_set_enabled(0);
     if (caps & CAP_PMU) {
-        pmu_set_mode(PMU_MODE_IDLE, 0);
-        pmu_set_wake(0);
-        pmu_write(PMU_EVENT_IE, 0);
-        pmu_write(PMU_EVENT, 0xFFu);
+        pmu_set_mode(PMU_MODE_IDLE);
+        pmu_write(PMU_IRQ_EN, 0);
+        pmu_write(PMU_SCRATCH1, 0);
+        pmu_clear_status(PMU_ST_W1C_ALL);
     }
-    if ((caps & CAP_DVFS) && pmu_cur_op() != 0) pm_set_opp(0);
-    if ((caps & CAP_CACHE) && cache_ctrl() != (CACHE_CTRL_IC_EN | CACHE_CTRL_DC_EN)) {
-        icache_inv_all();
-        dcache_flush_all();
-        cache_init();
-    }
+    if ((caps & CAP_DVFS) && pmu_cur_op() != PMU_RESET_OP) (void)pm_set_opp(PMU_RESET_OP);
 }
 
 static uint32_t run_from_state(void)

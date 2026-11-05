@@ -5,7 +5,7 @@ ENTRY(_start)
 MEMORY
 {
     ROM    (rx)  : ORIGIN = 0x00000000, LENGTH = 16K
-    ROMRAM (rw)  : ORIGIN = 0x20000400, LENGTH = 0xC00
+    ROMRAM (rw)  : ORIGIN = 0x10000400, LENGTH = 0xC00
 }
 
 SECTIONS
@@ -34,5 +34,5 @@ SECTIONS
         __bss_end = .;
     } > ROMRAM
     __rom_end = LOADADDR(.data) + SIZEOF(.data);
-    ASSERT(__bss_end <= 0x20000E00, "boot ROM .bss leaves less than 512 B of stack")
+    ASSERT(__bss_end <= 0x10000E00, "boot ROM .bss leaves less than 512 B of stack")
 }

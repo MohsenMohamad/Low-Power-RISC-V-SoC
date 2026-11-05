@@ -1,10 +1,10 @@
-/* Application image in RAM from 0x2000_1000; stack at the top of RAM. */
+/* Application image in RAM from 0x1000_1000; stack at the top of RAM. */
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x20001000, LENGTH = 0x1F000
+    RAM (rwx) : ORIGIN = 0x10001000, LENGTH = 0x1F000
 }
 
 SECTIONS

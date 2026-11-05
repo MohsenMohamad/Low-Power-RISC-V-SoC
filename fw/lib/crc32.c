@@ -1,8 +1,13 @@
 /* CRC-32 (IEEE 802.3, reflected, poly 0xEDB88320), byte-wise table.
- * Table generated with the standard bitwise algorithm. */
+ * Table generated with the standard bitwise algorithm.
+ *
+ * The table is deliberately not const: it is placed in .data, i.e. in RAM
+ * (the boot ROM copies its .data at every boot). The D-cache caches only the
+ * RAM window, so a table in the boot ROM would cost one uncached bus read
+ * through the CDC bridge per byte of image or context checked. */
 #include "lib.h"
 
-static const uint32_t crc_tab[256] = {
+static uint32_t crc_tab[256] = {
     0x00000000u, 0x77073096u, 0xEE0E612Cu, 0x990951BAu,
     0x076DC419u, 0x706AF48Fu, 0xE963A535u, 0x9E6495A3u,
     0x0EDB8832u, 0x79DCB8A4u, 0xE0D5E91Eu, 0x97D2D988u,

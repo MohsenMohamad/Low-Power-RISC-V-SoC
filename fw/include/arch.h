@@ -39,6 +39,10 @@ void     arch_irq_global_enable(void);
 void     arch_irq_enable(uint32_t code);
 void     arch_irq_disable(uint32_t code);
 int      arch_irq_is_enabled(uint32_t code);
+/* mie as a whole: wake-source mask (bits 1 << IRQ_*), save/replace/restore */
+uint32_t arch_irq_wake_sources(void);
+uint32_t arch_irq_mask_save(uint32_t new_mask);
+void     arch_irq_mask_restore(uint32_t old_mask);
 
 void     arch_wfi(void);
 uint64_t arch_cycles(void);

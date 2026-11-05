@@ -1,5 +1,6 @@
 /* Platform port: Spike (HTIF console and exit, CLINT timer). */
 #include "platform_api.h"
+#include "lib.h"
 
 volatile uint64_t tohost   __attribute__((section(".tohost"), aligned(64)));
 volatile uint64_t fromhost __attribute__((section(".tohost"), aligned(64)));
@@ -44,6 +45,8 @@ uint32_t platform_boot_arg(void)
 
 void platform_exit(uint32_t code)
 {
+    if (code == 0) puts_("PASS\n");
+    else printf_("FAIL 0x%08x\n", (unsigned)code);
     /* HTIF exit status is (tohost >> 1); keep it non-zero for any failure */
     uint64_t st = code ? 1 : 0;
     for (;;) htif_cmd(0, 0, (st << 1) | 1, 0);

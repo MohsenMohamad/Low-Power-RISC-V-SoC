@@ -4,9 +4,7 @@
 #include "trap.h"
 #include "drivers.h"
 #include "platform_api.h"
-#ifdef ARCH_RV32M
 #include "csr.h"
-#endif
 
 /* ------------------------------------------------------------ counters */
 static int t_counters(void)
@@ -26,7 +24,6 @@ static int t_counters(void)
 }
 TEST(1, "csr_counters", CAP_COUNTERS, t_counters);
 
-#ifdef ARCH_RV32M
 static int t_mregs(void)
 {
     static const uint32_t pat[] = {0u, 0xFFFFFFFFu, 0xA5A5A5A5u, 0x5A5A5A5Au, 0x80000001u};
@@ -118,7 +115,6 @@ static int t_mip(void)
     return TEST_PASS;
 }
 TEST(3, "csr_mip_pending", CAP_MCSR | CAP_CLINT, t_mip);
-#endif
 
 /* ------------------------------------------------------------ exceptions */
 static volatile uint32_t ex_cause, ex_epc, ex_tval, ex_count;

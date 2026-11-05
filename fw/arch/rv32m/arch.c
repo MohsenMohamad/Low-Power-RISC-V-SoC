@@ -46,6 +46,21 @@ int arch_irq_is_enabled(uint32_t code)
     return (csr_read(mie) >> code) & 1u;
 }
 
+uint32_t arch_irq_wake_sources(void)
+{
+    return csr_read(mie) & (MIP_MSIP | MIP_MTIP | MIP_MEIP);
+}
+
+uint32_t arch_irq_mask_save(uint32_t new_mask)
+{
+    return csr_swap(mie, new_mask);
+}
+
+void arch_irq_mask_restore(uint32_t old_mask)
+{
+    csr_write(mie, old_mask);
+}
+
 void arch_wfi(void)
 {
     __asm__ volatile("wfi" ::: "memory");

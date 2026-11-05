@@ -1,4 +1,4 @@
-/* Application startup. The image header is checked by the boot ROM before
+/* Application startup (doc/BOOT_ABI.md). The image header is checked by the boot ROM before
  * it jumps to _start (cold boot only; a resume never comes through here). */
 #include "handoff.h"
 
@@ -6,7 +6,7 @@
     .globl image_header
 image_header:
     .word IMAGE_MAGIC
-    .word 1                 /* header version             */
+    .word IMAGE_VERSION     /* header version             */
     .word __image_start     /* load address               */
     .word __image_size      /* bytes incl. header         */
     .word _start            /* entry point                */

@@ -2,7 +2,7 @@
 """Build and run every firmware check; print a pass/fail summary.
 
 Steps (each is PASS, FAIL or SKIPPED-with-reason; nothing is assumed):
-  build    firmware for spike/rv32m, lpsoc/rv32m
+  build    firmware for lpsoc and spike
   spike    full validation suite on Spike (--priv=M and --priv=MSU)
   selftest a deliberately failing test must be reported as FAIL
 
@@ -21,8 +21,8 @@ FW = os.path.join(ROOT, "build", "fw")
 
 # Tests that must be skipped (missing capability) on each platform; anything
 # else skipped is an error, so a broken capability probe cannot hide tests.
-SPIKE_SKIPS = {23, 24, 30, 31, 32, 33, 34, 35, 41, 42, 43, 44, 45, 46,
-               50, 51, 52, 60, 61, 70, 72, 73}           # no SoC peripherals
+SPIKE_SKIPS = {23, 24, 30, 31, 32, 33, 34, 35, 36, 41, 42, 43, 44, 45, 46, 47,
+               50, 51, 52, 60, 61, 70, 72, 73, 75, 76}    # no SoC peripherals
 SPIKE_MIN_PASS = 17
 
 results = []
@@ -94,11 +94,11 @@ def main():
         record("build firmware", None, "riscv64-unknown-elf-gcc not found")
         fw_ok = False
     else:
-        rc, _, t = run(["make", "-C", "fw", "all-configs"], "build_fw.log", 600)
+        rc, _, t = run(["make", "-C", "fw", "all-platforms"], "build_fw.log", 600)
         fw_ok = rc == 0
-        record("build firmware", fw_ok, "see build_fw.log" if rc else "spike/rv32m lpsoc/rv32m", t)
+        record("build firmware", fw_ok, "see build_fw.log" if rc else "lpsoc spike", t)
         if fw_ok:
-            rc, _, t = run(["make", "-C", "fw", "PLATFORM=spike", "ARCH=rv32m",
+            rc, _, t = run(["make", "-C", "fw", "PLATFORM=spike",
                             "BUILD=%s/selftest-spike" % FW, "EXTRA_CFLAGS=-DSUITE_SELFTEST"], "build_selftest.log", 600)
             record("build selftest firmware", rc == 0, "", t)
 
@@ -106,7 +106,7 @@ def main():
     if spike and fw_ok:
         for priv in ("M", "MSU"):
             rc, text, t = run([spike, "--priv=" + priv, "--isa=rv32im_zicsr_zifencei", "-m0x80000000:0x100000",
-                               os.path.join(FW, "spike-rv32m", "app.elf")], "spike_suite_%s.log" % priv, 600)
+                               os.path.join(FW, "spike", "suite.elf")], "spike_suite_%s.log" % priv, 600)
             ok, detail = suite_verdict(text, SPIKE_SKIPS, SPIKE_MIN_PASS)
             record("suite on Spike --priv=%s" % priv, ok and rc == 0, detail + ", exit %d" % rc, t)
     else:
@@ -115,7 +115,7 @@ def main():
     # ---------------- reporting self-test ----------------
     if spike and fw_ok:
         rc, text, t = run([spike, "--priv=M", "--isa=rv32im_zicsr_zifencei", "-m0x80000000:0x100000",
-                           os.path.join(FW, "selftest-spike", "app.elf")], "selftest_spike.log", 600)
+                           os.path.join(FW, "selftest-spike", "suite.elf")], "selftest_spike.log", 600)
         ok = (rc != 0 and re.search(r"^\[TEST  99\] selftest_must_fail +FAIL", text, re.M)
               and re.search(r"^\[TEST  98\] selftest_must_skip +SKIP", text, re.M)
               and "signature=0xbad00001" in text and "SUITE RESULT: FAIL" in text)

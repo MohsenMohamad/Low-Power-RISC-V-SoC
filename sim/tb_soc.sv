@@ -1,9 +1,17 @@
 // -----------------------------------------------------------------------------
 // tb_soc - SoC-level testbench (Verilator and Icarus Verilog)
 //
-// * Runs boot-ROM firmware on the integrated SoC (in-house RV32IM core with
-//   I-/D-cache in PD_CPU). +rom=<hex> selects the image (default
-//   build/fw/pm_test.hex); the firmware prints "PASS" or "FAIL <n>" on the UART.
+// * Runs firmware on the integrated SoC (in-house RV32IM core with I-/D-cache
+//   in PD_CPU): the boot ROM image (+rom=<hex>, default build/fw/lpsoc/rom.hex)
+//   and, acting as the host (doc/BOOT_ABI.md), an application image preloaded
+//   into RAM (+ram=<hex>) and a boot argument in the host mailbox
+//   (+bootarg=<hex>). Test completion: the firmware prints a line "PASS" or
+//   "FAIL ..." on the UART.
+// * UART console: every received line is shown as "[uart] ..."; +uart_log=<f>
+//   records the raw TX byte stream; +uart_in=<f> feeds the RX line, one line
+//   each time the firmware prints the prompt "mon> " (the line after a
+//   "zzz> " prompt is held back +wake_delay=<n> clk_aon cycles, default 60000,
+//   so the firmware is asleep before the byte that wakes it arrives).
 // * Drives four mutually asynchronous clocks (clk_aon + three DVFS clocks).
 // * External wake pin: pulsed when the PMU has been in OFF for EXT_WAKE_DELAY
 //   clk_aon cycles (the firmware uses it for the ext-wake tests).
@@ -22,7 +30,8 @@
 // * A requested power-down that the PMU refused (dirty D-cache) or that was
 //   aborted before the clock gate is reported as ABORTED; it is never counted
 //   as a completed transition, as coverage, or in the latency statistics.
-// Plusargs: +rom=<hex> +cov=<file> +vcd +timeout=<ns>
+// Plusargs: +rom=<hex> +ram=<hex> +bootarg=<hex> +cov=<file> +vcd +timeout=<ns>
+//           +uart_in=<file> +uart_log=<file> +wake_delay=<n>
 //           +break_iso (negative test: defeat isolation)
 //           +neg_short_rst (negative test: too short PD_CPU reset pulse)
 // -----------------------------------------------------------------------------
@@ -78,7 +87,7 @@ module tb_soc #(
   // ---------------- boot ROM image ----------------
   initial begin
     string rom;
-    if (!$value$plusargs("rom=%s", rom)) rom = "build/fw/pm_test.hex";
+    if (!$value$plusargs("rom=%s", rom)) rom = "build/fw/lpsoc/rom.hex";
     #1;  // after the ROM model's own initialisation
     for (int i = 0; i < 4096; i++) dut.u_aon.u_rom.g_rom.u_rom.mem[i] = 32'h0000_0013;
     $readmemh(rom, dut.u_aon.u_rom.g_rom.u_rom.mem);
@@ -98,6 +107,25 @@ module tb_soc #(
     void'($urandom(rs));
     #1;
     for (int i = 0; i < 32768; i++) dut.u_aon.u_ram.g_ram.u_ram.mem[i] = $urandom;
+  end
+
+  // ---------------- host: application image and boot argument ----------------
+  // (doc/BOOT_ABI.md: image at RAM+0x1000, host mailbox at RAM+0x100)
+  initial begin
+    string ram;
+    logic [31:0] barg;
+    #2;  // after the power-up content above
+    if ($value$plusargs("ram=%s", ram)) begin
+      $readmemh(ram, dut.u_aon.u_ram.g_ram.u_ram.mem);
+      if (dut.u_aon.u_ram.g_ram.u_ram.mem[32'h1000 / 4] !== 32'h5041_504C)
+        $fatal(1, "[tb] RAM image %s not loaded (no image header at RAM+0x1000)", ram);
+      $display("[tb] RAM image: %s", ram);
+    end
+    if ($value$plusargs("bootarg=%h", barg)) begin
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h100 / 4] = 32'h4841_5247;   // "HARG"
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h104 / 4] = barg;
+      $display("[tb] boot argument 0x%08h", barg);
+    end
   end
 
   // ---------------- OFF-state corruption model ----------------
@@ -134,7 +162,7 @@ module tb_soc #(
   // ---------------- reset, timeout, dump ----------------
   longint timeout_ns;
   initial begin
-    if (!$value$plusargs("timeout=%d", timeout_ns)) timeout_ns = 64'd20_000_000;
+    if (!$value$plusargs("timeout=%d", timeout_ns)) timeout_ns = 64'd60_000_000;
     if ($test$plusargs("vcd")) begin
       $dumpfile("build/sim/tb_soc.vcd");
       $dumpvars(0, tb_soc);
@@ -150,6 +178,23 @@ module tb_soc #(
   string line = "";
   bit    seen_pass, seen_fail;
 
+  int    uart_log_fd;
+  int    uart_frame_errs;
+  string tx_tail = "";
+  bit    prompt_seen;      // the firmware waits for the next input line
+  int    rx_hold;          // clk_aon cycles before the next line may start
+  int    wake_delay;
+  initial begin
+    string f;
+    if ($value$plusargs("uart_log=%s", f)) uart_log_fd = $fopen(f, "w");
+    if (!$value$plusargs("wake_delay=%d", wake_delay)) wake_delay = 60000;
+  end
+
+  function automatic bit ends_with(string str, string suffix);
+    if (str.len() < suffix.len()) return 1'b0;
+    return str.substr(str.len() - suffix.len(), str.len() - 1) == suffix;
+  endfunction
+
   initial begin : uart_mon
     logic [7:0] ch;
     forever begin
@@ -160,6 +205,15 @@ module tb_soc #(
         ch[i] = uart_tx;
       end
       repeat (UART_DIV) @(posedge clk_aon);
+      if (uart_tx !== 1'b1) begin
+        uart_frame_errs++;
+        $display("[tb] ERROR: UART framing error (stop bit)");
+      end
+      if (uart_log_fd != 0) $fwrite(uart_log_fd, "%c", ch);
+      tx_tail = {tx_tail, string'(ch)};
+      if (tx_tail.len() > 16) tx_tail = tx_tail.substr(tx_tail.len() - 16, tx_tail.len() - 1);
+      if (ends_with(tx_tail, "mon> ")) prompt_seen = 1'b1;
+      if (ends_with(tx_tail, "zzz> ")) begin prompt_seen = 1'b1; rx_hold = wake_delay; end
       if (ch == 8'h0A) begin
         $display("[uart] %s", line);
         if (line == "PASS") seen_pass = 1'b1;
@@ -171,6 +225,43 @@ module tb_soc #(
         end
       end else if (ch != 8'h0D) begin
         line = {line, string'(ch)};
+      end
+    end
+  end
+
+  // ---------------- UART RX driver (+uart_in) ----------------
+  // One input line per prompt: the line starts once the firmware printed its
+  // prompt; bytes of a line follow each other with a 4-bit-time gap.
+  byte unsigned rx_buf[$];
+  initial begin
+    string f;
+    int fd, c;
+    if ($value$plusargs("uart_in=%s", f)) begin
+      fd = $fopen(f, "rb");
+      if (fd == 0) $fatal(1, "[tb] cannot open %s", f);
+      while ((c = $fgetc(fd)) != -1) rx_buf.push_back(byte'(c));
+      $fclose(fd);
+    end
+  end
+  always @(posedge clk_aon) if (rx_hold > 0) rx_hold <= rx_hold - 1;
+  initial begin : uart_drv
+    byte unsigned b;
+    wait (por_n);
+    forever begin
+      @(posedge clk_aon);
+      if (rx_buf.size() != 0 && prompt_seen && rx_hold == 0) begin
+        prompt_seen = 1'b0;
+        do begin
+          b = rx_buf.pop_front();
+          uart_rx = 1'b0;                                   // start bit
+          repeat (UART_DIV) @(posedge clk_aon);
+          for (int i = 0; i < 8; i++) begin
+            uart_rx = b[i];
+            repeat (UART_DIV) @(posedge clk_aon);
+          end
+          uart_rx = 1'b1;                                   // stop bit + gap
+          repeat (5 * UART_DIV) @(posedge clk_aon);
+        end while (b != 8'h0A && rx_buf.size() != 0);
       end
     end
   end
@@ -460,6 +551,8 @@ module tb_soc #(
       errors++;
       $display("[tb] ERROR: cannot write coverage file %s", COV_FILE);
     end
+    if (uart_log_fd != 0) $fclose(uart_log_fd);
+    errors += uart_frame_errs;
     if (fw_pass && errors == 0 && illegal_arcs == 0) begin
       $display("[tb] TEST PASSED");
     end else begin
