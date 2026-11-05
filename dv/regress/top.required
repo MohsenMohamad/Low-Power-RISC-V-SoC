@@ -11,6 +11,10 @@ soc/boot_test-verilator
 soc/pm_test-icarus
 soc/boot_test-icarus
 soc/negative
+fw/suite-soc
+fw/suite-spike
+fw/monitor
+fw/negative
 pmu/unit
 formal
 mutation

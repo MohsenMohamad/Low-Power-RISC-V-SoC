@@ -15,6 +15,10 @@
 #   make boot-x      SoC, Icarus 4-state, stage-1 boot test + coverage goals
 #   make sim-neg     negative tests of the SoC bench (defeated isolation, firmware FAIL, timeout)
 #   make sim-pmu     PMU unit testbench (class-based constrained random, full coverage)
+#   make fw-suite    firmware validation suite on the SoC (Verilator), every test required
+#   make fw-spike    firmware validation suite on Spike (--priv=M and --priv=MSU)
+#   make fw-monitor  scripted UART monitor sessions on the SoC (application, boot ROM)
+#   make fw-neg      firmware-flow negative tests (failing test, aborted IDLE, bad images)
 #   make cosim       CPU: directed + random programs in lockstep with Spike
 #   make archtest    CPU: riscv-arch-test 3.9.1 (rv32i_m I, M, Zifencei, privilege)
 #   make cachetest   caches / AXI mux: SystemVerilog constrained-random unit benches
@@ -71,6 +75,7 @@ CHECK   := $(PYTHON) scripts/check_results.py
 COSIM_BIN := $(BUILD)/cosim/obj/Vcosim
 
 .PHONY: test toolchain lint lint-soc lint-cpu fw corrupt sim sim-x boot boot-x sim-neg sim-pmu \
+        fw-suite fw-spike fw-monitor fw-neg \
         cosim cosim-build archtest cachetest coverage formal mutation selftest clean
 
 test:
@@ -142,6 +147,34 @@ boot-x: $(IV_TB) $(FW_STAMP)
 # Negative tests: each run must FAIL for the reason it was built to provoke.
 sim-neg: $(VL_TB) $(IV_TB) $(FW_STAMP)
 	$(PYTHON) scripts/soc_neg.py --vl $(VL_TB) --iv "$(VVP) -n $(IV_TB)" --fw $(FW_DIR) --out $(BUILD)/sim/neg
+
+# ------------------------------------------------------------------ firmware on the SoC and Spike
+# scripts/run_fw.py runs and records; scripts/check_results.py judges against the
+# required lists (dv/regress/fw_*.required); the suite's power-state coverage is
+# checked against dv/regress/soc_fw_suite.goals.
+FW_RUN := $(PYTHON) scripts/run_fw.py --vl $(VL_TB) --fw $(FW_DIR)
+
+fw-suite: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) suite --out $(BUILD)/fw-suite; rc=$$?; \
+	$(CHECK) --name fw-suite --results $(BUILD)/fw-suite/results.json --required dv/regress/fw_suite_lpsoc.required \
+	  && $(SOC_COV) --cov $(BUILD)/fw-suite/cov_suite.txt --goals dv/regress/soc_fw_suite.goals \
+	     --waivers dv/regress/soc_pm_test.waivers && exit $$rc
+
+fw-spike: $(FW_STAMP)
+	$(FW_RUN) spike --spike $(SPIKE_PREFIX)/bin/spike --elf $(BUILD)/fw/spike/suite.elf --out $(BUILD)/fw-spike; rc=$$?; \
+	$(CHECK) --name fw-spike-M --results $(BUILD)/fw-spike/results_M.json --required dv/regress/fw_suite_spike.required \
+	  && $(CHECK) --name fw-spike-MSU --results $(BUILD)/fw-spike/results_MSU.json --required dv/regress/fw_suite_spike.required \
+	  && exit $$rc
+
+fw-monitor: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) monitor --out $(BUILD)/fw-monitor; rc=$$?; \
+	$(CHECK) --name fw-monitor --results $(BUILD)/fw-monitor/results.json --required dv/regress/fw_monitor.required \
+	  && exit $$rc
+
+fw-neg: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) neg --spike $(SPIKE_PREFIX)/bin/spike --out $(BUILD)/fw-neg; rc=$$?; \
+	$(CHECK) --name fw-neg --results $(BUILD)/fw-neg/results.json --required dv/regress/fw_neg.required \
+	  && exit $$rc
 
 # ------------------------------------------------------------------ PMU unit test
 $(BUILD)/sim/pmu/Vtb_pmu: rtl/aon/pmu.sv rtl/include/sva_macros.svh sim/pmu/tb_pmu.sv

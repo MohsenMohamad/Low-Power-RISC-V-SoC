@@ -19,6 +19,7 @@ fw/40
 fw/71
 fw/suite-result
 fw/exit
+fw/process-exit
 na fw/23  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/24  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/30  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)

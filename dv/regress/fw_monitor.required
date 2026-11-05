@@ -1,0 +1,3 @@
+# Scripted UART monitor sessions on the integrated SoC (fw/tests/monitor/*.txt).
+monitor/app
+monitor/rom

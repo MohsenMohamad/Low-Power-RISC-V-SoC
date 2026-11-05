@@ -9,6 +9,8 @@ with clock gating, power gating, RAM retention and DVFS.
 | [doc/SOC_REGMAP.md](doc/SOC_REGMAP.md) | Address map and register maps (normative) |
 | [doc/CPU_SOC_INTERFACE.md](doc/CPU_SOC_INTERFACE.md) | PD_CPU <-> PD_AON boundary: ports, clock domains, handshakes |
 | [doc/CPU.md](doc/CPU.md) | In-house RV32IM core, caches, AXI mux |
+| [doc/BOOT_ABI.md](doc/BOOT_ABI.md) | Boot and resume ABI: RAM layout, saved context, CRC, image header, PMU scratch registers (normative) |
+| [doc/firmware.md](doc/firmware.md) | Firmware: boot ROM, drivers, power management, validation suite, UART monitor |
 | [doc/VERIFICATION.md](doc/VERIFICATION.md) | CPU-subsystem verification flows (pre-integration description) |
 | [doc/INTEGRATION_REPORT.md](doc/INTEGRATION_REPORT.md) | Integration stages: merged content, decisions, results |
 | [doc/reviews/interface_audit.md](doc/reviews/interface_audit.md) | Cross-branch interface audit (finding IDs Bxx/Wxx) |
@@ -27,7 +29,8 @@ with clock gating, power gating, RAM retention and DVFS.
 | `rtl/common/` | Reset synchronizer, async FIFO, mtime snapshot crossing |
 | `rtl/tech/` | Technology wrappers with generic models (ICG, sync, isolation, power switch, SRAM, ROM) |
 | `upf/` | IEEE 1801 power intent |
-| `fw/` | Boot ROM code (`crt0.S`), power-management test, stage-1 boot test (GCC) |
+| `fw/` | Firmware, one tree for the SoC and Spike: boot ROM, drivers, power management, validation suite, UART monitor, stage-1 pm_test / boot_test (GCC) |
+| `tools/` | Image builder (`mkimage.py`), suite-log converter (`fw_results.py`), monitor session checker |
 | `sw/` | Directed CPU test programs |
 | `sim/` | SoC testbench (`tb_soc.sv`), PMU unit testbench |
 | `dv/` | CPU co-simulation (Spike), cache unit benches, arch-test model, regression lists |
@@ -61,6 +64,10 @@ with clock gating, power gating, RAM retention and DVFS.
   RAM retention); three DVFS operating points. The PMU powers PD_CPU down only
   while the CPU reports `idle_ack` and `cache_clean` (no dirty D-cache line).
 - Cache maintenance: CSR `mcachectl` (0x7C0) only.
+- The PMU wakes the CPU only for interrupt sources in its WAKE_MASK, which the
+  firmware sets to the sources it enabled in `mie`.
+- Boot: the boot ROM resumes a saved context (CRC-checked) or cold-boots an
+  application image from RAM (doc/BOOT_ABI.md).
 
 ## Running
 
@@ -77,11 +84,14 @@ make test
 
 `make test` runs every open-source flow (toolchain check, lint, firmware, CPU
 co-simulation, riscv-arch-test, cache benches, CPU coverage gate, SoC
-simulations in Verilator and Icarus, SoC negative tests, PMU unit test, formal
-proofs with cover runs, mutation analysis, checker self-tests). Each step checks
+simulations in Verilator and Icarus, SoC negative tests, the firmware
+validation suite on the SoC and on Spike, UART monitor sessions, firmware
+negative tests, PMU unit test, formal proofs with cover runs, mutation
+analysis, checker self-tests). Each step checks
 its required-test list in `dv/regress/`; any failure, missing test or unknown
 test makes it exit nonzero. Single steps: `make lint`, `make sim`, `make boot`,
-`make sim-x`, `make boot-x`, `make sim-neg`, `make sim-pmu`, `make cosim`,
+`make sim-x`, `make boot-x`, `make sim-neg`, `make fw-suite`, `make fw-spike`,
+`make fw-monitor`, `make fw-neg`, `make sim-pmu`, `make cosim`,
 `make archtest`, `make cachetest`, `make coverage`, `make formal`,
 `make mutation`, `make selftest` (see the `Makefile` header).
 
