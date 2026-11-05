@@ -13,7 +13,8 @@ file provides, for use inside a testbench module:
 
 The testbench defines the macros
   `PD_CPU_PATH                  hierarchical path of the domain instance
-  `PD_CPU_CORRUPT(lhs, width)   statement corrupting lhs (X or random)
+  `PD_CPU_CORRUPT(lhs, width)   statement corrupting lhs (X or random), NBA
+  `PD_CPU_CORRUPT_BLK(lhs, w)   same, blocking (for clocked-block temporaries)
   `PD_CPU_FORCE(lhs, width)     statement forcing an output
 so the same model works for 4-state (X) and 2-state (random) simulators.
 
@@ -37,9 +38,34 @@ def sv_name(name: str) -> str:
     return name
 
 
+_src_cache = {}
+
+
+def blocking_names(mod):
+    """Names assigned with a blocking '=' somewhere in the module's source.
+
+    Such variables (clocked-block temporaries) must be overwritten with a
+    blocking assignment too: Verilator rejects mixing '=' and '<=' on one
+    variable. All other state is corrupted with a non-blocking assignment.
+    """
+    src = mod.get("attributes", {}).get("src", "")
+    m = re.match(r"(.*):(\d+)\.\d+-(\d+)\.\d+$", src)
+    if not m:
+        return set()
+    fname, first, last = m.group(1), int(m.group(2)), int(m.group(3))
+    if fname not in _src_cache:
+        try:
+            _src_cache[fname] = open(fname).read().splitlines()
+        except OSError:
+            _src_cache[fname] = []
+    text = "\n".join(_src_cache[fname][first - 1:last])
+    return set(re.findall(r"\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)?=(?!=)", text))
+
+
 def collect(modules, mod_name, path, out):
     mod = modules[mod_name]
     netnames = mod["netnames"]
+    blk = blocking_names(mod)
     ports = set(mod.get("ports", {}))
     # A flop output bit can carry several names (e.g. "x_q" and the port "x_o"
     # driven by "assign x_o = x_q"). Prefer the internal variable, because a
@@ -61,7 +87,8 @@ def collect(modules, mod_name, path, out):
                 n, _ = bit2net[b]
                 regs[n] = len(netnames[n]["bits"])
     for n, width in sorted(regs.items()):
-        out.append(("reg", f"{path}.{sv_name(n)}", width))
+        kind = "blk" if n in blk else "reg"
+        out.append((kind, f"{path}.{sv_name(n)}", width))
 
     for mname, mem in sorted(mod.get("memories", {}).items()):
         size = int(mem["size"])
@@ -96,8 +123,9 @@ def main() -> int:
         "",
         "task automatic pd_cpu_corrupt_state();",
     ]
-    for _, p, w in elems:
-        lines.append(f"  `PD_CPU_CORRUPT({p}, {w})")
+    for kind, p, w in elems:
+        macro = "PD_CPU_CORRUPT_BLK" if kind == "blk" else "PD_CPU_CORRUPT"
+        lines.append(f"  `{macro}({p}, {w})")
     lines += ["endtask", "", "task automatic pd_cpu_force_outputs();"]
     for p, w in outputs:
         lines.append(f"  `PD_CPU_FORCE(`PD_CPU_PATH.{p}, {w})")

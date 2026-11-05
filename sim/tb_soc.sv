@@ -22,10 +22,12 @@
 
 `define PD_CPU_PATH tb_soc.dut.u_pd_cpu
 `ifdef CORRUPT_X
-  `define PD_CPU_CORRUPT(lhs, width) lhs = 'x;
+  `define PD_CPU_CORRUPT(lhs, width) lhs <= 'x;
+  `define PD_CPU_CORRUPT_BLK(lhs, width) lhs = 'x;
   `define PD_CPU_FORCE(lhs, width)   force lhs = 'x;
 `else
-  `define PD_CPU_CORRUPT(lhs, width) lhs = width'({$urandom, $urandom});
+  `define PD_CPU_CORRUPT(lhs, width) lhs <= width'({$urandom, $urandom});
+  `define PD_CPU_CORRUPT_BLK(lhs, width) lhs = width'({$urandom, $urandom});
   `define PD_CPU_FORCE(lhs, width)   force lhs = off_rnd[width-1:0];
 `endif
 
@@ -36,7 +38,10 @@ module tb_soc #(
 );
   // ---------------- clocks / reset ----------------
   logic       clk_aon = 1'b0;
-  logic [2:0] clk_op  = 3'b000;
+  // Separate scalar clocks (Verilator 5.020 misses edges when individual bits
+  // of one vector are driven by different processes).
+  logic       clk_op0 = 1'b0, clk_op1 = 1'b0, clk_op2 = 1'b0;
+  wire  [2:0] clk_op  = {clk_op2, clk_op1, clk_op0};
   logic       por_n   = 1'b0;
   logic       uart_rx = 1'b1;
   logic       uart_tx;
@@ -45,11 +50,11 @@ module tb_soc #(
 
   // Mutually asynchronous: AON 41 ns, OP0 47 ns, OP1 23 ns, OP2 11 ns.
   always #20.5 clk_aon   = ~clk_aon;
-  always #23.5 clk_op[0] = ~clk_op[0];
-  always #11.5 clk_op[1] = ~clk_op[1];
+  always #23.5 clk_op0 = ~clk_op0;
+  always #11.5 clk_op1 = ~clk_op1;
   initial begin
     #3.1;
-    forever #5.5 clk_op[2] = ~clk_op[2];
+    forever #5.5 clk_op2 = ~clk_op2;
   end
 
   soc_top #(
@@ -285,6 +290,10 @@ module tb_soc #(
     $fdisplay(fd, "  PD_CPU corruption events: %0d", n_corrupt);
     return missing;
   endfunction
+
+`ifdef TB_DEBUG_INC
+  `include `TB_DEBUG_INC
+`endif
 
   task automatic finish_sim(input bit fw_pass);
     int fd, missing;

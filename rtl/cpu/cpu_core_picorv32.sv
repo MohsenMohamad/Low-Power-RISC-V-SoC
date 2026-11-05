@@ -9,10 +9,14 @@
 //
 // PicoRV32 has no WFI instruction. The wrapper emulates it on the native
 // memory interface: when an instruction fetch returns the WFI encoding
-// (0x10500073) the core is handed a NOP instead and the next memory request
+// (0x10500073) the core is handed a NOP instead. PicoRV32 may prefetch that
+// word before older instructions (e.g. a store) have executed, so the wait
+// state is only entered at the next sequential instruction fetch (address of
+// the WFI + 4): at that point every older instruction has retired. That fetch
 // is held back until an interrupt line is pending. While held there are no
 // outstanding bus transactions, so core_sleep_o is a clean "WFI and
-// quiescent" indication.
+// quiescent" indication. A non-sequential fetch (the prefetched WFI was
+// discarded by a taken branch) cancels the pending WFI.
 //
 // PMU handshake (4-phase): idle_req (from PD_AON, synchronized here) is
 // acknowledged only while in WFI; while idle_req is high the core does not
@@ -76,6 +80,12 @@ module cpu_core_picorv32 #(
   logic [31:0] mem_addr, mem_wdata, mem_rdata;
   logic [3:0]  mem_wstrb;
   logic        trap;
+  // PCPI co-processor port (MUL/DIV instantiated here with named instances
+  // so every PD_CPU state element has a tool-independent hierarchical path).
+  logic        pcpi_valid;
+  logic [31:0] pcpi_insn, pcpi_rs1, pcpi_rs2;
+  logic        mul_wr, mul_wait, mul_ready, div_wr, div_wait, div_ready;
+  logic [31:0] mul_rd, div_rd;
 
   /* verilator lint_off PINCONNECTEMPTY */
   picorv32 #(
@@ -89,10 +99,10 @@ module cpu_core_picorv32 #(
     .COMPRESSED_ISA    (0),
     .CATCH_MISALIGN    (1),
     .CATCH_ILLINSN     (1),
-    .ENABLE_PCPI       (0),
-    .ENABLE_MUL        (1),
+    .ENABLE_PCPI       (1),
+    .ENABLE_MUL        (0),
     .ENABLE_FAST_MUL   (0),
-    .ENABLE_DIV        (1),
+    .ENABLE_DIV        (0),
     .ENABLE_IRQ        (0),
     .ENABLE_TRACE      (0),
     .REGS_INIT_ZERO    (0),
@@ -113,14 +123,14 @@ module cpu_core_picorv32 #(
     .mem_la_addr  (),
     .mem_la_wdata (),
     .mem_la_wstrb (),
-    .pcpi_valid   (),
-    .pcpi_insn    (),
-    .pcpi_rs1     (),
-    .pcpi_rs2     (),
-    .pcpi_wr      (1'b0),
-    .pcpi_rd      (32'b0),
-    .pcpi_wait    (1'b0),
-    .pcpi_ready   (1'b0),
+    .pcpi_valid   (pcpi_valid),
+    .pcpi_insn    (pcpi_insn),
+    .pcpi_rs1     (pcpi_rs1),
+    .pcpi_rs2     (pcpi_rs2),
+    .pcpi_wr      (mul_wr | div_wr),
+    .pcpi_rd      (mul_wr ? mul_rd : div_rd),
+    .pcpi_wait    (mul_wait | div_wait),
+    .pcpi_ready   (mul_ready | div_ready),
     .irq          (32'b0),
     .eoi          (),
     .trace_valid  (),
@@ -129,22 +139,41 @@ module cpu_core_picorv32 #(
   /* verilator lint_on PINCONNECTEMPTY */
   assign trap_o = trap;
 
+  picorv32_pcpi_mul u_mul (
+    .clk (clk_i), .resetn (rst_ni), .pcpi_valid (pcpi_valid), .pcpi_insn (pcpi_insn),
+    .pcpi_rs1 (pcpi_rs1), .pcpi_rs2 (pcpi_rs2), .pcpi_wr (mul_wr), .pcpi_rd (mul_rd),
+    .pcpi_wait (mul_wait), .pcpi_ready (mul_ready)
+  );
+
+  picorv32_pcpi_div u_div (
+    .clk (clk_i), .resetn (rst_ni), .pcpi_valid (pcpi_valid), .pcpi_insn (pcpi_insn),
+    .pcpi_rs1 (pcpi_rs1), .pcpi_rs2 (pcpi_rs2), .pcpi_wr (div_wr), .pcpi_rd (div_rd),
+    .pcpi_wait (div_wait), .pcpi_ready (div_ready)
+  );
+
   // ---------------- WFI emulation ----------------
-  logic wfi_q;
-  logic irq_pending;
-  logic wfi_hit;
+  logic        wfi_q;        // waiting for an interrupt
+  logic        wfi_seen_q;   // WFI fetched, not yet retired
+  logic [31:0] wfi_next_q;   // address of the instruction after the WFI
+  logic        irq_pending;
+  logic        wfi_hit;
+  logic        wfi_enter;
 
   assign irq_pending = meip_s | mtip_s | msip_s;
 
   // ---------------- native -> AXI4-Lite master ----------------
-  typedef enum logic [1:0] {A_IDLE, A_WRITE, A_READ, A_DONE} astate_e;
-  astate_e     astate_q;
+  // Plain vector (not an enum) so the OFF-state corruption model can write
+  // arbitrary values into it.
+  localparam logic [1:0] A_IDLE = 2'd0, A_WRITE = 2'd1, A_READ = 2'd2, A_DONE = 2'd3;
+  logic [1:0]  astate_q;
   logic        aw_done_q, w_done_q;
   logic [31:0] rdata_q;
   logic        req_ok;
 
+  // The sequential fetch after a WFI enters the wait state instead of starting.
+  assign wfi_enter = wfi_seen_q && mem_valid && mem_instr && (mem_addr == wfi_next_q);
   // A new request may start only outside WFI.
-  assign req_ok = mem_valid && !wfi_q;
+  assign req_ok = mem_valid && !wfi_q && !wfi_enter;
 
   assign m_awaddr_o  = {mem_addr[31:2], 2'b00};
   assign m_awprot_o  = 3'b000;
@@ -168,13 +197,21 @@ module cpu_core_picorv32 #(
       aw_done_q <= 1'b0;
       w_done_q  <= 1'b0;
       rdata_q   <= '0;
-      wfi_q     <= 1'b0;
+      wfi_q      <= 1'b0;
+      wfi_seen_q <= 1'b0;
+      wfi_next_q <= '0;
     end else begin
       case (astate_q)
         A_IDLE: begin
           aw_done_q <= 1'b0;
           w_done_q  <= 1'b0;
-          if (req_ok) astate_q <= (|mem_wstrb) ? A_WRITE : A_READ;
+          if (wfi_enter) begin
+            wfi_q      <= 1'b1;
+            wfi_seen_q <= 1'b0;
+          end else if (req_ok) begin
+            astate_q <= (|mem_wstrb) ? A_WRITE : A_READ;
+            if (mem_instr) wfi_seen_q <= 1'b0;   // non-sequential: cancelled
+          end
         end
         A_WRITE: begin
           if (m_awvalid_o && m_awready_i) aw_done_q <= 1'b1;
@@ -193,7 +230,10 @@ module cpu_core_picorv32 #(
         end
         A_DONE: begin
           // mem_ready is high this cycle; PicoRV32 consumes the data.
-          if (wfi_hit) wfi_q <= 1'b1;
+          if (wfi_hit) begin
+            wfi_seen_q <= 1'b1;
+            wfi_next_q <= {mem_addr[31:2], 2'b00} + 32'd4;
+          end
           astate_q <= A_IDLE;
         end
         default: astate_q <= A_IDLE;
