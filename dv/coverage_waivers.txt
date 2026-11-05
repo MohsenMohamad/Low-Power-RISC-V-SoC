@@ -1,0 +1,4 @@
+# Coverage-goal waivers for scripts/cov_report.py (doc/SPEC.md verification rules).
+# Format: <kind> <bin>  # reason          kind: isa | cover | cg
+# A waiver without a reason, or one that no longer matches a hole, fails the run.
+cover cp_wb_error  # Unreachable in the cpu_top co-simulation: its AXI memory never answers a cacheable write with an error. The write-back error path is verified in tb_dcache phases 4a/4b (flush error keeps the line dirty, retry, eviction error reported) and covered there by cg_maint.cp_wb_err.err.

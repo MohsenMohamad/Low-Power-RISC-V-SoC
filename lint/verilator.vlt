@@ -1,0 +1,9 @@
+`verilator_config
+// All RTL is linted with -Wall. No third-party code is part of the design.
+//
+// Reset synchronizers (rst_sync -> tech_sync): the last stage of the chain is
+// the synchronized reset (used asynchronously by the flops it resets) and the
+// earlier stages feed it as data. Verilator reports the stage array as one
+// signal used both ways; this is the intended async-assert/sync-release
+// structure. Waived for the stage array of the synchronizer cell only.
+lint_off -rule SYNCASYNCNET -file "*rtl/tech/tech_sync.sv" -match "*stage_q*"

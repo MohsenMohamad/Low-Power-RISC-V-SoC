@@ -1,0 +1,17 @@
+# Steps of `make test` (scripts/regress.py). Each step checks its own required list.
+toolchain
+lint
+fw
+cpu/cosim
+cpu/archtest
+cpu/cachetest
+cpu/coverage
+soc/pm_test-verilator
+soc/boot_test-verilator
+soc/pm_test-icarus
+soc/boot_test-icarus
+soc/negative
+pmu/unit
+formal
+mutation
+selftest

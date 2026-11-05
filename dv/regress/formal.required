@@ -1,0 +1,9 @@
+# SymbiYosys jobs (scripts/run_formal.py): every proof has a cover run.
+pmu:prove
+pmu:cover
+dvfs_mux:prove
+dvfs_mux:cover
+async_fifo:prove
+async_fifo:cover
+cdc_snapshot:prove
+cdc_snapshot:cover

@@ -1,0 +1,23 @@
+# Mutants of scripts/mutation.py; each must be killed (or waived with a reason in dv/mutation_waivers.txt).
+fwd_mem_rs1
+hazard_csr
+hold_capture
+mem_issue_ok
+irq_no_drain
+mret_mpie
+rem_sign
+srai_decode
+fetch_discard
+dc_dirty
+dc_lru
+dc_flush_way1
+dc_refill_err
+dc_wstrb
+ic_inval
+ic_victim
+mux_rd_owner
+wfi_no_hold
+ack_not_quiescent
+dc_clean_on_error
+dc_evict_err_lost
+dc_clean_during_evict

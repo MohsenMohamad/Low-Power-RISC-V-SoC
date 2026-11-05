@@ -1,0 +1,2 @@
+# Waivers for dv/regress/soc_pm_test.goals: <group> <bin>  # reason
+arc IDLE_REQ->WAKE_REL  # WFI abort: needs an interrupt in the few-cycle window between core_sleep reaching the PMU and idle_req reaching the core, which depends on the phase of three asynchronous clocks; not deterministically reachable from firmware. Covered by the PMU unit test (sim/pmu/tb_pmu.sv, c_abort, injected aborts) and by the formal cover run (pmu cover, c_idlereq_abort).

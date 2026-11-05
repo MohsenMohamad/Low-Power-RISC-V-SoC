@@ -1,0 +1,24 @@
+[tasks]
+prove
+cover
+
+[options]
+multiclock on
+prove: aigsmt z3
+prove: mode prove
+cover: mode cover
+cover: depth 40
+
+[engines]
+prove: abc pdr
+cover: smtbmc z3
+
+[script]
+read_verilog -sv -formal -I. tech_sync.sv cdc_async_fifo.sv async_fifo_formal.sv
+prep -top async_fifo_formal
+
+[files]
+../rtl/include/sva_macros.svh
+../rtl/tech/tech_sync.sv
+../rtl/common/cdc_async_fifo.sv
+async_fifo_formal.sv

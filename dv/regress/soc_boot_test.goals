@@ -1,0 +1,6 @@
+# Coverage goals of the stage-1 boot test (fw/boot_test.c on sim/tb_soc.sv).
+illegal transitions == 0
+pstate RUN->SLEEP >= 2     # SLEEP with dirty D-cache data + CRC-rejected resume
+pstate SLEEP->RUN >= 2
+aborted RUN->SLEEP == 1    # exactly the deliberate dirty-D-cache refusal
+corrupt events >= 2

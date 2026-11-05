@@ -1,0 +1,25 @@
+[tasks]
+prove
+cover
+
+[options]
+multiclock on
+prove: aigsmt z3
+prove: mode prove
+cover: mode cover
+cover: depth 60
+
+[engines]
+prove: abc pdr
+cover: smtbmc z3
+
+[script]
+read_verilog -sv -formal -I. tech_sync.sv cdc_snapshot_src.sv cdc_snapshot_dst.sv cdc_snapshot_formal.sv
+prep -top cdc_snapshot_formal
+
+[files]
+../rtl/include/sva_macros.svh
+../rtl/tech/tech_sync.sv
+../rtl/common/cdc_snapshot_src.sv
+../rtl/common/cdc_snapshot_dst.sv
+cdc_snapshot_formal.sv

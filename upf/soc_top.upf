@@ -1,0 +1,135 @@
+## =============================================================================
+## soc_top.upf - power intent for the low-power RISC-V SoC (IEEE 1801-2015)
+##
+## Domains
+##   PD_AON  always on: PMU, bus/CDC bridge, isolation cells, clock/reset
+##           control, DVFS mux, timers, interrupt controller, UART, ROM, RAM
+##   PD_CPU  switchable, DVFS-scaled: u_pd_cpu (in-house RV32IM core, I-cache,
+##           D-cache, AXI mux, boundary synchronizers, mtime snapshot receiver)
+##
+## Supplies
+##   VDD_AON     0.90 V fixed
+##   VDD_CPU     0.70 / 0.80 / 0.90 V from an external regulator, selected
+##               by soc_top.vsel_o (OP0 / OP1 / OP2)
+##   VDD_CPU_SW  VDD_CPU after the PD_CPU header switch (PSW_CPU)
+##   VSS         common ground
+##
+## RTL correspondence (the RTL instantiates the cells through wrappers):
+##   PSW_CPU control  : pwr_sw_en (u_aon/u_pmu)    ack: pwr_good (u_pwr_sw)
+##   isolation enable : iso_en    (u_aon/u_pmu)    cells: u_iso (tech_iso)
+##   CPU reset        : u_clk_rst/u_cpu_rst       clock gate: u_clk_rst/u_cg
+##   RAM retention    : u_aon/u_ram (tech_ram_sp ret_i) - macro-internal
+##                      periphery switch, the array stays on VDD_AON
+##
+## Not checked with a UPF-aware tool: none is available in this environment
+## (Icarus, Verilator and Yosys ignore UPF). The OFF-state behaviour is
+## modelled in simulation by sim/tb_soc.sv plus the generated corruption
+## model (scripts/gen_corrupt_model.py).
+## =============================================================================
+
+upf_version 3.0
+set_design_top soc_top
+
+## ---------------------------------------------------------------- supplies
+create_supply_port VDD_AON -direction in
+create_supply_port VDD_CPU -direction in
+create_supply_port VSS     -direction in
+
+create_supply_net VDD_AON
+create_supply_net VDD_CPU
+create_supply_net VDD_CPU_SW
+create_supply_net VSS
+
+connect_supply_net VDD_AON -ports VDD_AON
+connect_supply_net VDD_CPU -ports VDD_CPU
+connect_supply_net VSS     -ports VSS
+
+create_supply_set SS_AON -function {power VDD_AON}    -function {ground VSS}
+create_supply_set SS_CPU -function {power VDD_CPU_SW} -function {ground VSS}
+
+## ---------------------------------------------------------------- domains
+create_power_domain PD_AON -include_scope \
+  -supply {primary SS_AON}
+
+create_power_domain PD_CPU -elements {u_pd_cpu} \
+  -supply {primary SS_CPU} \
+  -supply {default_isolation SS_AON}
+
+## ---------------------------------------------------------------- power switch
+## Header switch chain; the acknowledge (end of the daisy chain) is pwr_good.
+create_power_switch PSW_CPU \
+  -domain             PD_CPU \
+  -input_supply_port  {vin  VDD_CPU} \
+  -output_supply_port {vout VDD_CPU_SW} \
+  -control_port       {sw_en pwr_sw_en} \
+  -ack_port           {sw_ack pwr_good {sw_en}} \
+  -on_state           {PSW_ON  vin {sw_en}} \
+  -off_state          {PSW_OFF {!sw_en}}
+
+## ---------------------------------------------------------------- isolation
+## Every PD_CPU output is clamped to 0 in the always-on parent while iso_en is
+## high. The PMU asserts iso_en (with the CPU clock gated and the bus idle)
+## before the switch opens and releases it only after power-good and reset
+## release (proven in formal/pmu.sby).
+set_isolation ISO_CPU_OUT \
+  -domain             PD_CPU \
+  -applies_to         outputs \
+  -clamp_value        0 \
+  -isolation_signal   iso_en \
+  -isolation_sense    high \
+  -isolation_supply   SS_AON \
+  -location           parent
+
+## Inputs of PD_CPU are driven from PD_AON and need no isolation.
+set_isolation ISO_CPU_IN_NONE \
+  -domain             PD_CPU \
+  -applies_to         inputs \
+  -no_isolation
+
+## ---------------------------------------------------------------- level shifters
+## VDD_CPU scales down to 0.70 V while PD_AON stays at 0.90 V.
+set_level_shifter LS_CPU_OUT \
+  -domain      PD_CPU \
+  -applies_to  outputs \
+  -rule        low_to_high \
+  -location    parent
+
+set_level_shifter LS_CPU_IN \
+  -domain      PD_CPU \
+  -applies_to  inputs \
+  -rule        high_to_low \
+  -location    self
+
+## ---------------------------------------------------------------- retention
+## No register retention in PD_CPU: the firmware saves the architectural state
+## to the main RAM (PD_AON) before SLEEP / DEEP_SLEEP and the boot ROM restores
+## it. The RAM's own retention mode (DEEP_SLEEP) is a macro feature controlled
+## by u_aon/u_pmu/ram_ret_o.
+
+## ---------------------------------------------------------------- power states
+add_power_state SS_AON -supply \
+  -state ON  {-supply_expr {power == {FULL_ON, 0.90} && ground == {FULL_ON, 0.0}}}
+
+add_power_state SS_CPU -supply \
+  -state OP2 {-supply_expr {power == {FULL_ON, 0.90} && ground == {FULL_ON, 0.0}}} \
+  -state OP1 {-supply_expr {power == {FULL_ON, 0.80} && ground == {FULL_ON, 0.0}}} \
+  -state OP0 {-supply_expr {power == {FULL_ON, 0.70} && ground == {FULL_ON, 0.0}}} \
+  -state OFF {-supply_expr {power == OFF} -simstate CORRUPT}
+
+add_power_state PD_AON -domain \
+  -state AON_ON {-logic_expr {SS_AON == ON}}
+
+## CPU power states as seen by the PMU. RUN and IDLE differ only in the clock
+## gate (not a supply state); SLEEP and DEEP_SLEEP differ in RAM retention.
+add_power_state PD_CPU -domain \
+  -state RUN_OP2    {-logic_expr {SS_CPU == OP2}} \
+  -state RUN_OP1    {-logic_expr {SS_CPU == OP1}} \
+  -state RUN_OP0    {-logic_expr {SS_CPU == OP0}} \
+  -state SLEEP      {-logic_expr {SS_CPU == OFF && u_aon/ram_ret == 0}} \
+  -state DEEP_SLEEP {-logic_expr {SS_CPU == OFF && u_aon/ram_ret == 1}}
+
+## Legal combinations: PD_CPU may only be on while PD_AON is on.
+create_power_state_group PSG_SOC
+add_power_state PSG_SOC -group \
+  -state ALL_ON   {-logic_expr {PD_AON == AON_ON && (PD_CPU == RUN_OP0 || PD_CPU == RUN_OP1 || PD_CPU == RUN_OP2)}} \
+  -state CPU_OFF  {-logic_expr {PD_AON == AON_ON && (PD_CPU == SLEEP || PD_CPU == DEEP_SLEEP)}}
