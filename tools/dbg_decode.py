@@ -106,6 +106,12 @@ def signature(d):
             t["info"] & 3 == 0 for t in d["trace"]) else 0
     last_ps = (e.get("pwr_last", 0) >> 2) & 3
     wdt = bool(e.get("status", 0) & 0x18)
+    if wdt and not c.get("mcause"):
+        # a hang is a loop: identify it by its lowest PC among the last
+        # retired instructions, not by wherever the bite happened to land
+        tail = [t["pc"] for t in d["trace"] if t["info"] & 3 == 0][-8:]
+        if tail:
+            pc = min(tail)
     return {"reason": d["reason"], "cause": cause, "pc": pc, "pstate": PSTATE[last_ps], "watchdog": wdt}
 
 

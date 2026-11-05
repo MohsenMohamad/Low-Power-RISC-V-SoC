@@ -1,0 +1,52 @@
+# Regression suites for tools/regress.py (doc/DEBUG_SPEC.md section 13).
+#
+# kind = "make-list"  dir has list-tests / run-test TEST=<t> SEED=<n>
+#        "make-test"  dir has a 'test' target (one test)
+#        "cocotb"     cocotb smoke directory (make SIM=verilator, results.xml)
+#        "script"     arbitrary command (run from the repository root)
+#        "stress"     random stress seeds: make -C dir run-test TEST=<test> SEED=<s>
+# Directories under [discover].roots that are not listed here are found
+# automatically (Makefile with list-tests / test target, or cocotb makefile).
+
+[discover]
+roots   = ["rtl", "verif", "fw", "platform", "sim", "tests", "formal"]
+# verif/uvm needs a commercial simulator; explicit suites are not rediscovered
+exclude = ["verif/uvm", "rtl/debug", "verif/debug", "fw/debug", "build"]
+
+[[suite]]
+name    = "debug-rtl-lint"
+kind    = "make-list"
+dir     = "rtl/debug"
+timeout = 300
+
+[[suite]]
+name    = "debug-fw-build"
+kind    = "make-list"
+dir     = "fw/debug"
+timeout = 300
+
+[[suite]]
+name    = "debug-sv"
+kind    = "make-list"
+dir     = "verif/debug"
+build   = "build"            # built once, serially, before tests run in parallel
+exclude = ["integ_stress"]   # run by the stress suite with N seeds
+seeds   = [1]
+timeout = 900
+
+[[suite]]
+name    = "session3-fw"
+kind    = "script"
+cmd     = ["python3", "tools/run_tests.py"]
+needs   = ["tools/run_tests.py"]
+timeout = 3600
+# their runner prints one PASS/FAIL/SKIPPED line per step and a final verdict
+pass_regex = "make test: .* -> PASS"
+
+[[suite]]
+name    = "stress"
+kind    = "stress"
+dir     = "verif/debug"
+test    = "integ_stress"
+build   = "build"
+timeout = 1200
