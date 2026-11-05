@@ -54,40 +54,35 @@ All four blocks:
 
 ## 2. Memory map
 
-`SPEC.md` does not assign addresses. The debug subsystem uses a range that is
-not used by any other block in the current proposals:
+`SPEC.md` does not assign addresses. The SoC map in use (Session 3,
+`doc/firmware.md`: ROM `0x0000_0000`, RAM `0x2000_0000` / uncached alias
+`0x3000_0000`, UART `0x4000_0000`, intc `0x4000_1000`, PMU `0x4000_2000`,
+timer `0x4001_0000`, external port `0x4F00_0000`, cache control
+`0x5000_0000`) leaves `0x4002_0000` free in the AON peripheral region:
 
 | Base          | Size  | Block        |
 |---------------|-------|--------------|
-| `0x5000_0000` | 4 KB  | `dbg_trace`  |
-| `0x5000_1000` | 4 KB  | `dbg_evcnt`  |
-| `0x5000_2000` | 4 KB  | `dbg_errlog` |
-| `0x5000_3000` | 4 KB  | `dbg_wdt`    |
-| `0x5000_4000` – `0x5000_FFFF` | 48 KB | reserved for debug |
+| `0x4002_0000` | 4 KB  | `dbg_trace`  |
+| `0x4002_1000` | 4 KB  | `dbg_evcnt`  |
+| `0x4002_2000` | 4 KB  | `dbg_errlog` |
+| `0x4002_3000` | 4 KB  | `dbg_wdt`    |
+| `0x4002_4000` – `0x4002_FFFF` | 48 KB | reserved for debug |
 
-**[MERGE]** the base is a single constant: `DBG_BASE` in
-`fw/debug/include/dbg_regs.h` and `--dbg-base` / `soc_map.py` in
-`tools/bench/`. If the SoC top area places the subsystem elsewhere only those
-two constants change. The blocks decode only `addr[11:0]`; `dbg_subsys`
-decodes `addr[13:12]`.
+**[MERGE]** the base is one constant: `DBG_BASE` in
+`fw/debug/include/dbg_regs.h` (Makefile variable) and `dbg_base` in the
+bench board profile (`tools/bench/board.py`). The blocks decode only
+`addr[11:0]`; `dbg_subsys` decodes `addr[13:12]`.
 
-### 2.1 Platform map used by the simulation stand-ins (testbench only)
+### 2.1 Integration preview (PicoRV32 bring-up SoC)
 
-The firmware and bench demo run on `verif/debug/plat/` (Spike + Verilated debug
-RTL + stand-in UART/PMU/timer). The stand-in addresses below exist only in that
-platform and in `fw/debug/include/platform.h` (**[MERGE]** replaced by the SoC
-map and the Session 3 drivers):
-
-| Base          | Device (stand-in)                         |
-|---------------|-------------------------------------------|
-| `0x0200_0000` | machine timer: `mtime` +0xBFF8, `mtimecmp` +0x4000 (CLINT layout) |
-| `0x1000_0000` | UART (`DATA` +0, `STATUS` +4: bit0 tx_busy, bit1 rx_valid; `CTRL` +8: bit0 rx irq enable) |
-| `0x1000_1000` | PMU stand-in (see §8.4)                   |
-| `0x1000_2000` | simulation control (`EXIT` +0: write `code<<1 | 1`) |
-| `0x5000_0000` | debug subsystem (real RTL)                |
-| `0x8000_0000` | RAM, 128 KB                               |
-
----
+The PicoRV32 SoC of Session 3 (`platform/picorv32`, used unmodified) has no
+free interconnect slot, so `verif/debug/integ/tb_dbg_soc.sv` attaches
+`dbg_subsys` to its external port: the debug blocks are at
+`0x4F00_4000`–`0x4F00_7FFF` there, and the debug firmware is built with
+`DBG_BASE=0x4F004000` for that platform (default of `fw/debug/Makefile`
+for `ARCH=picorv32`). The external port has no wait states, which the
+blocks meet (accept in cycle t, answer in t+1, SVA-checked in the
+testbench). See section 14 for the rest of the preview glue.
 
 ## 3. Common register conventions
 
@@ -198,7 +193,7 @@ Parameter `DEPTH` (power of 2, 16..128, default 64). Each entry is 4 words.
 |-----|------|--------|-------|-------------|
 | 0x000 | ID | RO | 0xDB600101 | |
 | 0x004 | CTRL | RW | 0x00000068 | `[0] EN` capture enable; `[1] CLEAR` W1S (clears buffer, pointers, freeze, stop); `[2] FREEZE` W1S software freeze; `[3] LOG_TRAP` record trap entries; `[4] LOG_PWR` record power-change entries; `[5] FRZ_EXC` freeze on exception; `[6] FRZ_ERR` freeze when `freeze_i` is high |
-| 0x008 | STATUS | RO | 0 | `[0] ACTIVE` capturing; `[1] FROZEN`; `[2] WRAPPED`; `[3] STOPPED` stop trigger hit; `[4] ARMED` enabled, waiting for start; `[5] CLR_PEND` |
+| 0x008 | STATUS | RO | 0 | `[0] ACTIVE` capturing; `[1] FROZEN`; `[2] WRAPPED`; `[3] STOPPED` stop trigger hit; `[4] ARMED` enabled, waiting for start; `[5] CLR_PEND`; `[6] OVF` an entry was dropped (4-entry write FIFO full; cannot happen under the port contract) |
 | 0x00C | TRIG | RW* | 0 | `[1:0] START_SEL`, `[5:4] STOP_SEL`: 0 none (start: immediately on EN; stop: never), 1 PC match, 2 exception, 3 power-state change |
 | 0x010 | START_PC | RW* | 0 | start PC compare value |
 | 0x014 | STOP_PC | RW* | 0 | stop PC compare value |
@@ -337,39 +332,30 @@ Bite sequence when `COUNT` reaches 0 with `EN=1`:
    keeps running instead and the boot code must kick it. Without `RST_EN`
    (log only) counting continues.
 
-### 8.4 PMU stand-in used by the platform simulation (testbench only)
-
-Not part of the debug hardware; documented here because the debug firmware and
-bench demo use it. **[MERGE]** replaced by the real PMU and its driver.
-
-| Off | Name | Description |
-|-----|------|-------------|
-| 0x00 | REQ | `[1:0]` state to enter on the next WFI (0 = stay in RUN/IDLE gating only) |
-| 0x04 | DVFS | `[1:0]` requested operating point, applied at the next IDLE entry |
-| 0x08 | STATE | `[1:0]` current state, `[5:4]` current DVFS point |
-| 0x0C | FAULT | `[1:0]` result to report for the next transition (fault injection) |
-| 0x10 | WAKE_CNT | wakes performed |
-
----
-
 ## 9. Firmware (`fw/debug/`)
 
-* `include/dbg_regs.h` – register map (this document); `drivers/` – trace,
-  counters, error log, watchdog drivers (only these four).
-* `crash/` – crash handler and fixed-format dump (§10).
-* `stress/` – seeded random stress test (§11).
-* `platform/` – `soc` (weak hooks bound to the Session 3 drivers at merge) and
-  `plat` (stand-ins of the simulation platform).
-* `monitor_shim/` – **simulation stand-in only**, implements exactly the
-  assumed monitor command subset of §12 so the bench can be demonstrated. It is
-  deleted at merge and the Session 3 monitor is used.
-* Toolchain: `riscv64-unknown-elf-gcc` if present, else `clang --target=riscv32`
-  + `ld.lld`; `-march=rv32im_zicsr -mabi=ilp32`. Override with `TOOLCHAIN=gcc|clang`.
-
-Seed / mailbox: a 32-byte mailbox at `RAM_BASE + 0x1FF00` (`MBOX_MAGIC`
-`0xDB6B0C5E`, `SEED`, `TEST_ID`, `FLAGS`, `ITER`). The loader (platform sim,
-bench or debugger) writes it before starting an image. **[MERGE]** align the
-address with the RAM map.
+* Built on the Session 3 runtime in `fw/` (crt0, lib, UART/timer/intc/PMU/
+  cache drivers, power management, CPU ports, monitor), which is used
+  unmodified; `fw/debug` adds only:
+  * `include/dbg_regs.h`, `drivers/` – trace, counters, error log, watchdog drivers;
+  * `crash/` – crash handler and fixed-format dump (section 10);
+  * `app/dbg_app.c` – stress test (section 11), driver self test, expected
+    crash / hang tests, divergence kernel, and monitor commands added through
+    the monitor's extension API: `dbg`, `dbgrun <test> <seed> [iters] [flags]`,
+    plus `sleep` / `opp` / `exit` with the same syntax and output as
+    Session 3's application so the bench adapter works with both images;
+  * `lib/rt64.c` – 64-bit division helpers, linked only for clang (no libgcc).
+* Tests (`dbgrun` id / `+test=` in simulation): 1 stress, 2 driver self test,
+  3 illegal instruction (expected crash), 4 misaligned load (expected crash),
+  5 hang (expected watchdog reset + post-mortem dump), 6 divergence kernel.
+* Toolchain: `riscv64-unknown-elf-gcc` if present, else
+  `clang --target=riscv32-unknown-elf` + `ld.lld`; `TOOLCHAIN=gcc|clang`
+  forces one. `-march=rv32im_zicsr_zifencei -mabi=ilp32`, `-Werror`.
+* Run control: the integration testbench provides seed / flags / iterations
+  in its control device (`SIMCTRL_SEED` 0x10, `FLAGS` 0x14, `ITERS` 0x18,
+  `DBG_MAGIC` 0x1C); on a board the bench writes the mailbox at
+  `RAM_BASE + 0x300` (Session 3 persistent area, uncached alias) or uses
+  `dbgrun`. **[MERGE]** align the mailbox address with the RAM map.
 
 ## 10. Crash dump format (UART, fixed and parseable)
 
@@ -388,40 +374,52 @@ T <idx> pc=0x.. data=0x.. ts=0x.. info=0x..      (oldest first, n lines)
 ### DBG-CRASH END crc=0x<crc32 of all lines from BEGIN to the line before END>
 ```
 
-The decoder (`tools/dbg_decode.py`) rejects a dump whose CRC does not match.
+The CRC-32 (IEEE) covers the bytes of every line from `BEGIN` up to the line before `END`, each terminated by `\n` (the console expands `\n` to `\r\n`; the decoder removes the `\r`). The decoder (`tools/dbg_decode.py`) flags a dump whose CRC does not match.
 
 ## 11. Random stress test
 
-`fw/debug/stress/`: xorshift32 PRNG seeded from the mailbox; the seed is
-printed first (`STRESS seed=0x...`). Each iteration draws an operation:
-compute (checked against a precomputed result), memory traffic (pattern
-write/readback across RAM, checked), cache flush (`fence`/`fence.i` + driver
-hook), interrupt (timer interrupt, handler count checked), sleep/wake in IDLE,
-SLEEP or DEEP_SLEEP (via the PMU hook, wake by timer), DVFS change (applied in
-IDLE). Every random decision comes only from the PRNG, so the same seed gives
-the same sequence; each iteration prints `I <n> op=<name> arg=0x..`, so two
-runs can be diffed. Ends with `STRESS PASS seed=... iters=...` or a crash dump.
-Optional fault injection (`FLAGS` bit 0): with a probability of 1/64 per
-iteration an illegal instruction, misaligned load, load access fault or hang
-(watchdog) is injected, to exercise the crash path and triage.
+`fw/debug/app/dbg_app.c` (test 1): xorshift32 PRNG seeded from the run
+control; the seed is printed first (`STRESS seed=0x...`). Each iteration
+draws an operation: compute (two formulations of a mul/div/rem kernel must
+agree), memory traffic (pattern write/readback, compared through the
+uncached alias after a D$ clean), cache maintenance (clean/flush/invalidate,
+then buffer CRC), timer interrupt (handler count), sleep/wake in IDLE, SLEEP
+or DEEP_SLEEP through `pm_suspend` (wake by timer, RAM CRC after wake),
+DVFS change through `pm_set_opp`. All random decisions come from the PRNG,
+so a seed reproduces the run exactly (identical UART logs, checked); every
+iteration prints `I <n> op=<name> arg=0x..`. The watchdog runs during the
+test (kicked per iteration, paused in SLEEP / DEEP_SLEEP). The run ends with
+`COV ...` functional-coverage lines and `STRESS PASS seed=...`, or a crash
+dump. `FLAGS` bit 0: with probability 1/16 per iteration an illegal
+instruction, misaligned load, load access fault (where the CPU has them) or
+a hang is injected, to exercise the crash path and triage.
 
-## 12. Bench protocol adapter — assumed monitor commands **[MERGE: to be aligned with the monitor at merge]**
+## 12. Bench and monitor protocol
 
-SPEC.md says only "memory/register peek/poke, run test by ID". The Session 3
-monitor sources are not on this branch, so all protocol details live in one
-module, `tools/bench/monitor_adapter.py`. The bench never builds a protocol of
-its own. The minimal assumed command set (line based, `\r` or `\n` terminated,
-prompt `> ` after every response):
+The bench uses the Session 3 UART monitor as implemented on branch
+`claude/zealous-planck-kdx8mw` (`fw/app/monitor.c`, `fw/app/main.c`,
+`doc/firmware.md`). All protocol details are in one module,
+`tools/bench/monitor_adapter.py`; no other bench file knows the protocol.
 
-| Command | Response | Use |
-|---------|----------|-----|
-| `r <addr>` | `<value hex>` | peek 32-bit |
-| `w <addr> <value>` | `ok` | poke 32-bit |
-| `t <id>` | test output, then a line containing `PASS` or `FAIL` | run test by ID |
-| `c <addr> <len>` (optional) | `<crc32 hex>` | checksum; if missing, the adapter verifies by read-back |
-| `g <addr>` (optional) | – | start a loaded image; if missing, the adapter uses `t` with the image ID |
+* prompt `mon> ` (`zzz> ` before a UART-wake sleep); input is echoed; output
+  lines end with `\r\n`; errors start with `ERR`
+* `peek <addr|blk.reg> [n]` → `0x%08x: 0x%08x` per word; `poke <addr> <v>` → `OK`;
+  `regs <blk>`; `go <addr>`; `reset` (boot ROM and its reduced monitor)
+* application: `run <id|all>` (`[TEST n] name PASS|FAIL|SKIP`, `SUITE RESULT:`),
+  `info`, `list`, `sleep <idle|sleep|deep> <ticks|uart>` (`woke: result ...`),
+  `opp <0..2>`, `exit [code]`
+* debug application additions: `dbg`, `dbgrun` (`DBGRUN RESULT: PASS|FAIL`)
+* stream alignment: the adapter sends an unknown command with a unique marker
+  and waits for `ERR unknown command '<marker>'`, so stale prompts and boot
+  banners never shift command/response pairs.
 
-Numbers are hexadecimal with optional `0x`. Errors print a line starting with `err`.
+The monitor has no load or checksum command, so `tools/bench/loader.py`
+writes images with `poke`, reads them back with `peek <addr> 64` and compares
+CRC-32 with the host; the boot ROM checks the image header CRC again on
+`reset`. Forced power transitions write PMU registers (`WAKE_EN`,
+`DVFS_OP`) with `poke` and use the monitor's `sleep` / `opp` to execute the
+WFI; each transition is checked in the PMU counters, the debug event
+counters (wake count, time in state, DVFS count) and the error log.
 
 ## 13. Regression conventions
 
@@ -432,8 +430,33 @@ Numbers are hexadecimal with optional `0x`. Errors print a line starting with `e
 * otherwise a Makefile with a `test` target is run as one test;
 * cocotb smoke directories (Makefile including `cocotb-config --makefiles`) are
   run with `make SIM=verilator` and their `results.xml` is parsed;
-* `verif/uvm/` is excluded (commercial simulator).
+* `verif/uvm/` is excluded (commercial simulator);
+* scripts are configured explicitly in `tools/regress_suites.toml` (Session 3's
+  `tools/run_tests.py`, pass pattern `make test: ... -> PASS`);
+* random stress seeds: `make -C verif/debug run-test TEST=integ_stress SEED=<s>`;
+* suites with a `build` target are built once, serially, before their tests
+  run in parallel.
 
-A test passes when its command exits 0 and its log contains no line matching
-`(?i)^\s*(%?error|fatal|.*\bFAIL\b)`. Coverage files (`coverage*.dat`,
+A test passes when its command exits 0, its log (and the test's own
+simulator / UART logs) contain no `%Error`, `%Fatal`, `TEST FAILED`,
+`SIM RESULT: FAIL`, `CHECK FAILED` or failed assertion, and the suite's
+pass pattern (if any) is found. `SKIP` (tool missing) is never counted as PASS. Coverage files (`coverage*.dat`,
 `*.info`) found in a test's directory are collected by `tools/cov_merge.py`.
+
+## 14. Integration preview glue (testbench only)
+
+`verif/debug/integ/tb_dbg_soc.sv` connects the debug subsystem to the
+PicoRV32 SoC until the SoC top of Session 2 provides the real ports:
+
+| Debug port | Preview source | Difference from the real port |
+|---|---|---|
+| retire `ret_*` | PicoRV32 `dbg_valid_insn && launch_next_insn`, `dbg_insn_addr`, `dbg_insn_opcode` (the RVFI retire condition) | none |
+| trap `trap_*` | PicoRV32 IRQ entry (`eoi` 0 -> non-zero): bit 1 -> cause 2, bit 2 -> cause 4, bits 3/4/5 -> MTI/MSI/MEI; `tval` 0 | ecall/ebreak/illegal all report cause 2; misaligned/bus error report 4 |
+| cache events, stall | PicoRV32 cache hit/miss strobes, `mem_valid && !mem_ready` | none |
+| `pwr_state_i`, `dvfs_op_i`, `pmu_evt_*` | derived from the PMU FSM state, `cur_op`, `cnt_abort` | results other than OK/aborted are not produced |
+| `cpu_rst_req_o` | applied as a PMU software reset (forced register write) | no effect while the PMU is not in RUN |
+| isolation | all CPU-side inputs forced to 0 while the PMU isolates PD_CPU | none |
+
+Tools: the testbenches need Verilator >= 5.03x with `--timing` and an SMT
+solver (`z3`) for constrained `randomize()`; Ubuntu 24.04's Verilator 5.020
+does not support SVA `##` sequences. CI builds Verilator v5.054.

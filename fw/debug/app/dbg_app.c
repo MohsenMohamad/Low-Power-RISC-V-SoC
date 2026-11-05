@@ -458,7 +458,58 @@ static int cmd_exit(int argc, char **argv)
     platform_exit(code);
 }
 
+/* Same syntax and output as Session 3's application monitor (fw/app/main.c),
+ * so the bench protocol adapter works with either image. */
+static int cmd_sleep(int argc, char **argv)
+{
+    uint32_t ticks = 0;
+    enum pm_state st;
+    int uart_wake = argc >= 3 && !strcmp(argv[2], "uart");
+    if (argc < 3 || (!uart_wake && parse_u32(argv[2], &ticks))) {
+        puts_("ERR usage: sleep <idle|sleep|deep> <ticks|uart>\n");
+        return -1;
+    }
+    if (!strcmp(argv[1], "idle")) st = PM_IDLE;
+    else if (!strcmp(argv[1], "sleep")) st = PM_SLEEP;
+    else if (!strcmp(argv[1], "deep")) st = PM_DEEP_SLEEP;
+    else { puts_("ERR state\n"); return -1; }
+    if (!pmu_present()) { puts_("ERR no PMU\n"); return -1; }
+    if (uart_wake) {
+        uart_set_ie(UART_IE_RX);
+        intc_enable(INTC_SRC_UART);
+        pmu_set_wake(PMU_WAKE_MEIP);
+        puts_(MON_WAKE_PROMPT);
+        uart_flush();
+    } else {
+        uart_flush();
+        dcache_clean_all();
+        pmu_set_wake(PMU_WAKE_MTIP);
+        timer_set_cmp(timer_now() + ticks);
+    }
+    int r = pm_suspend(st, 0);
+    timer_cancel();
+    uart_set_ie(0);
+    intc_disable(INTC_SRC_UART);
+    pmu_set_wake(0);
+    if (uart_wake) putch('\n');
+    printf_("woke: result %d, rst_cause %u, wake_src %u, off_time %u\n", r,
+            (unsigned)pmu_rst_cause(), (unsigned)pmu_read(PMU_WAKE_SRC), (unsigned)pmu_read(PMU_OFF_TIME));
+    return r < 0;
+}
+
+static int cmd_opp(int argc, char **argv)
+{
+    uint32_t op;
+    if (argc < 2 || parse_u32(argv[1], &op)) { puts_("ERR usage: opp <0..2>\n"); return -1; }
+    int r = pm_set_opp(op);
+    if (r) { printf_("ERR opp %d\n", r); return -1; }
+    printf_("opp %u\n", (unsigned)pmu_cur_op());
+    return 0;
+}
+
 static const mon_cmd_t dbg_cmds[] = {
+    {"sleep",  "<state> <t|uart>",       "idle|sleep|deep for t ticks or until UART input", cmd_sleep},
+    {"opp",    "<0..2>",                 "set CPU operating point",    cmd_opp},
     {"dbg",    "",                       "dump debug state",           cmd_dbg},
     {"dbgrun", "<t> <seed> [it] [fl]",   "1 stress 2 drv 3 ill 4 mis 5 hang 6 div", cmd_dbgrun},
     {"exit",   "[code]",                 "end simulation",             cmd_exit},

@@ -1,0 +1,114 @@
+# Regression on every push: debug RTL lint and testbenches, debug firmware
+# builds, PicoRV32 integration preview tests, random stress seeds, Session 3
+# firmware/SoC suite, bench demo against the simulation. UVM (verif/uvm)
+# is excluded: it needs a commercial simulator.
+name: regression
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "number of random stress seeds"
+        default: "8"
+
+env:
+  VERILATOR_REF: v5.054            # Ubuntu's 5.020 lacks SVA '##' and constraint solving
+  SPIKE_REF: f90d5af53f50b0feec7a7cbcb4411e1e0410c465
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages (RISC-V GCC, clang/lld, z3, build deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-unknown-elf clang lld llvm z3 \
+            git autoconf flex bison help2man libfl-dev ccache perl \
+            device-tree-compiler libboost-regex-dev libboost-system-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python dependencies
+        run: pip install pyserial
+
+      - name: Cache Verilator
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-${{ env.VERILATOR_REF }}-ubuntu-24.04
+      - name: Build Verilator
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b "$VERILATOR_REF" https://github.com/verilator/verilator /tmp/verilator
+          cd /tmp/verilator && autoconf && ./configure --prefix=/opt/verilator
+          make -j"$(nproc)" && sudo make install
+
+      - name: Cache Spike
+        id: cache-spike
+        uses: actions/cache@v4
+        with:
+          path: /opt/spike
+          key: spike-${{ env.SPIKE_REF }}-ubuntu-24.04
+      - name: Build Spike
+        if: steps.cache-spike.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/riscv-software-src/riscv-isa-sim /tmp/spike
+          cd /tmp/spike && git checkout "$SPIKE_REF" && git submodule update --init --depth 1
+          mkdir build && cd build && ../configure --prefix=/opt/spike
+          make -j"$(nproc)" && sudo make install
+
+      - name: Tool versions
+        run: |
+          echo "/opt/verilator/bin" >> "$GITHUB_PATH"
+          echo "/opt/spike/bin" >> "$GITHUB_PATH"
+          /opt/verilator/bin/verilator --version
+          riscv64-unknown-elf-gcc --version | head -1
+          clang --version | head -1
+
+      - name: Regression (all suites + random stress seeds)
+        run: |
+          python3 tools/regress.py -j "$(nproc)" --seeds "${{ github.event.inputs.seeds || 8 }}" \
+            --seed-base "${{ github.run_number }}" --out build/regress
+
+      - name: Triage
+        if: always()
+        run: python3 tools/triage.py build/regress || true
+
+      - name: Bench demo against the simulation (pty bridge)
+        if: always()
+        run: python3 tools/bench/sequencer.py tools/bench/testlists/sim_demo.toml --board sim --out build/bench
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-results
+          path: |
+            build/regress/summary.txt
+            build/regress/results.json
+            build/regress/junit.xml
+            build/regress/logs/
+            build/regress/artifacts/**/*.log
+            build/regress/artifacts/**/*.uart
+            build/triage/
+            build/bench/results.json
+            build/bench/uart_capture.log
+            build/bench/artifacts/
+            build/test/
+          if-no-files-found: warn
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/regress/coverage/
+          if-no-files-found: warn
