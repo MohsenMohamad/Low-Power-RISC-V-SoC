@@ -626,6 +626,18 @@ divergence); the bench alone
 Not run: UVM (not merged; commercial simulator), UPF-aware checks, FPGA
 build (later stage).
 
+### CI
+
+First run on the stage-3 pull request
+(https://github.com/MohsenMohamad/Low-Power-RISC-V-SoC/pull/3), workflow
+`make test`, run 12,
+https://github.com/MohsenMohamad/Low-Power-RISC-V-SoC/actions/runs/42172204462,
+commit `5c88536`: fully green. Tool cache hit (setup script unchanged);
+`make test` 23/23 required steps PASS, `== make test: PASS`, 2493 s on the
+ubuntu-24.04 runner (debug/unit 91 s, debug/soc 75 s, debug/bench 616 s,
+formal 462 s, mutation 381 s; selftest 68/68, mutation 21/22 killed + 1
+waived), the same steps and results as the local run.
+
 ### Open items
 
 1. Stress-test coverage: the 4 seeds x 24 iterations completed 9 sleeps;
