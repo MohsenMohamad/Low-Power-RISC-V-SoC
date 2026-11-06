@@ -21,7 +21,18 @@ _start:
     .option norelax
     la gp, __global_pointer$
     .option pop
-    la a0, __bss_start
+    /* .data: copy from the image (LMA) to its run-time address, so the image
+     * itself is never written (fw/platform/lpsoc/app.ld) */
+    la a0, __data_start
+    la a1, __data_end
+    la a2, __data_lma
+4:  bgeu a0, a1, 5f
+    lw t0, 0(a2)
+    sw t0, 0(a0)
+    addi a0, a0, 4
+    addi a2, a2, 4
+    j 4b
+5:  la a0, __bss_start
     la a1, __bss_end
 1:  bgeu a0, a1, 2f
     sw zero, 0(a0)

@@ -29,6 +29,10 @@ selftest/tb_pmu/vsel-mutant
 selftest/formal_pmu/vsel-mutant
 selftest/tb_pmu/wake-mask-mutant
 selftest/formal_pmu/wake-mask-mutant
+selftest/tb_pmu/wdt-bus-mutant
+selftest/formal_pmu/wdt-bus-mutant
+selftest/tb_pmu/wdt-resume-mutant
+selftest/formal_pmu/wdt-resume-mutant
 selftest/run_cosim/exit0-without-pass
 selftest/run_cosim/pass-with-nonzero-exit
 # firmware flow (stage 2): result converter + checker, image builder, monitor checker

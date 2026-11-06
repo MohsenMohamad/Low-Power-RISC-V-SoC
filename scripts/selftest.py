@@ -264,6 +264,13 @@ PMU_MUTANTS = [
     # wake mask ignored (stage-1 open item 3): SVA a_wake_masked, the bench's
     # masked-noise check
     ("wake-mask-mutant", "  assign wake     = |(wake_src & wake_mask_q);\n", "  assign wake     = |wake_src;\n"),
+    # watchdog reset isolates a running core with a bus transaction in flight
+    # (audit B17): SVA a_iso_on_bus_idle, the bench's retry check
+    ("wdt-bus-mutant", "          if (bus_idle_i) state_d = ST_ISO_ON;\n          else            state_d = ST_CLK_UNGATE;",
+     "          state_d = ST_ISO_ON;"),
+    # watchdog reset reported as a resume: SVA a_wdt_status, the bench's
+    # STATUS check
+    ("wdt-resume-mutant", "        st_resume_q      <= !wdt_seq_q;\n", "        st_resume_q      <= 1'b1;\n"),
 ]
 
 

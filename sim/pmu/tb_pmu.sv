@@ -42,6 +42,7 @@ interface pmu_if (input logic clk);
   logic [2:0]  dvfs_active;
   logic        irq;
   logic [4:0]  state;
+  logic        wdt_rst_req;      // watchdog PD_CPU reset request (dbg_wdt)
 endinterface
 
 package pmu_tb_pkg;
@@ -51,14 +52,31 @@ package pmu_tb_pkg;
                           R_WAKE_MASK = 12'h24, R_IDLE_CNT = 12'h28;
   localparam int ST_RUN = 0, ST_IDLE_REQ = 1, ST_IDLE = 3, ST_VUP = 4, ST_SWITCH = 5, ST_VDN = 6,
                  ST_OFF = 10;
-  localparam int NARC = 24;
+  localparam int ST_WDT_GATE = 19, ST_RST_REL = 15;
+  localparam int NARC = 30;
   // FSM arcs {from, to}; must match rtl/aon/pmu.sv
   localparam logic [9:0] ARCS [NARC] = '{
     {5'd0, 5'd1}, {5'd1, 5'd2}, {5'd1, 5'd18}, {5'd2, 5'd3}, {5'd2, 5'd7},
     {5'd3, 5'd4}, {5'd3, 5'd17}, {5'd4, 5'd5}, {5'd5, 5'd6}, {5'd6, 5'd3},
     {5'd7, 5'd8}, {5'd7, 5'd3}, {5'd8, 5'd9}, {5'd9, 5'd10}, {5'd10, 5'd11},
     {5'd10, 5'd12}, {5'd11, 5'd12}, {5'd12, 5'd13}, {5'd13, 5'd14}, {5'd14, 5'd15},
-    {5'd15, 5'd16}, {5'd16, 5'd17}, {5'd17, 5'd18}, {5'd18, 5'd0}};
+    {5'd15, 5'd16}, {5'd16, 5'd17}, {5'd17, 5'd18}, {5'd18, 5'd0},
+    // watchdog reset (doc/SOC_REGMAP.md "Watchdog reset")
+    {5'd0, 5'd19}, {5'd19, 5'd20}, {5'd20, 5'd8}, {5'd20, 5'd17}, {5'd3, 5'd8}, {5'd8, 5'd12}};
+
+  // Watchdog-reset episode: the request arrives with the PMU in RUN (core
+  // running, optionally with a bus transaction in flight at the first check),
+  // IDLE, SLEEP or DEEP_SLEEP.
+  class pmu_wdt_episode;
+    rand bit [1:0]    kind;        // 0 RUN, 1 IDLE, 2 SLEEP, 3 DEEP_SLEEP
+    rand bit          busy;        // RUN: the bridge reports a transaction at the first check
+    rand int unsigned busy_len;
+    rand int unsigned delay;       // cycles in the stable state before the request
+    constraint c_d { busy_len inside {[4:20]}; delay inside {[0:30]}; }
+    function string sprint();
+      return $sformatf("wdt kind=%0d busy=%0d/%0d delay=%0d", kind, busy, busy_len, delay);
+    endfunction
+  endclass
 
   // ---------------------------------------------------------------------------
   class pmu_episode;
@@ -122,6 +140,7 @@ package pmu_tb_pkg;
     virtual pmu_if vif;
     pmu_delay dly_cg, dly_psw, dly_rst, dly_mux;
     int unsigned bus_busy;
+    int unsigned wdt_busy;             // bus busy in WDT_GATE (one time: forces a retry)
 
     function new(virtual pmu_if v);
       vif     = v;
@@ -185,6 +204,14 @@ package pmu_tb_pkg;
         if (vif.state == 5'd2 && vif.cg_ack == 1'b0 && bus_busy > 0) begin
           vif.bus_idle <= 1'b0;
           repeat (bus_busy) @(posedge vif.clk);
+          vif.bus_idle <= 1'b1;
+        end
+        if (vif.state == 5'd19 && wdt_busy > 0) begin
+          automatic int unsigned n = wdt_busy;
+          wdt_busy = 0;
+          vif.bus_idle <= 1'b0;             // busy through the WDT_CHECK decision
+          while (vif.state != 5'd20) @(posedge vif.clk);
+          repeat (n) @(posedge vif.clk);
           vif.bus_idle <= 1'b1;
         end
       end
@@ -285,6 +312,8 @@ package pmu_tb_pkg;
     int dirty_hits [3];
     int masked_hold [3];               // masked pending source held, per mode
     int abort_hits, wake_in_dvfs, illegal;
+    int wdt_hits [4];                  // watchdog reset from RUN / IDLE / SLEEP / DEEP_SLEEP
+    int wdt_retry;
 
     function void sample_state(logic [4:0] prev, logic [4:0] cur);
       bit found = 0;
@@ -336,6 +365,13 @@ package pmu_tb_pkg;
       end
       $display("  WFI abort : %0d%s", abort_hits, abort_hits == 0 ? "  MISSING" : "");
       $display("  wake during DVFS : %0d%s", wake_in_dvfs, wake_in_dvfs == 0 ? "  MISSING" : "");
+      for (int k = 0; k < 4; k++) begin
+        $display("  watchdog reset from %s : %0d%s", k == 0 ? "RUN" : k == 1 ? "IDLE" : k == 2 ? "SLEEP" : "DEEP_SLEEP",
+                 wdt_hits[k], wdt_hits[k] == 0 ? "  MISSING" : "");
+        if (wdt_hits[k] == 0) holes++;
+      end
+      $display("  watchdog reset retried (bus busy) : %0d%s", wdt_retry, wdt_retry == 0 ? "  MISSING" : "");
+      if (wdt_retry == 0) holes++;
       if (abort_hits == 0) holes++;
       if (wake_in_dvfs == 0) holes++;
       $display("  coverage holes: %0d, illegal transitions: %0d", holes, illegal);
@@ -352,6 +388,7 @@ package pmu_tb_pkg;
     pmu_cov  cov;
     int      errors;
     bit      ret_seen;
+    bit      wdt_retry_seen, rst_rel_seen;   // set by monitor()
 
     function new(virtual pmu_if v);
       vif  = v;
@@ -418,6 +455,9 @@ package pmu_tb_pkg;
         @(posedge vif.clk);
         if (vif.rst_n) begin
           cov.sample_state(prev, vif.state);
+          if (prev == 5'd20 && vif.state == 5'd17) wdt_retry_seen = 1'b1;
+          if ($test$plusargs("trace_states") && prev != vif.state) $display("%t state %0d -> %0d bus_idle %b", $time, prev, vif.state, vif.bus_idle);
+          if (vif.state == ST_RST_REL) rst_rel_seen = 1'b1;
           if (vif.ram_ret) ret_seen = 1'b1;
         end
         prev = vif.state;
@@ -476,6 +516,7 @@ package pmu_tb_pkg;
       check(st[17] == rm.exp_resume_deep, $sformatf("RESUME_DEEP %0d (%s)", st[17], ep.sprint()));
       check(st[18] == rm.exp_dvfs_done,   $sformatf("DVFS_DONE %0d (%s)", st[18], ep.sprint()));
       check(st[19] == rm.exp_err_dirty,   $sformatf("ERR_DIRTY %0d (%s)", st[19], ep.sprint()));
+      check(st[20] == 1'b0,               $sformatf("WDT_RST set without a watchdog reset (%s)", ep.sprint()));
       check(st[9:8] == rm.cur_op,         $sformatf("CUR_OP %0d exp %0d", st[9:8], rm.cur_op));
       check(st[10] == (rm.target != rm.cur_op), "DVFS_PEND");
       check(vif.irq == rm.exp_dvfs_done,  "irq");
@@ -493,11 +534,66 @@ package pmu_tb_pkg;
       check(ret_seen == rm.exp_ret, $sformatf("RAM retention seen %0d (%s)", ret_seen, ep.sprint()));
       if (rm.exp_dvfs_done) cov.op_hits[op_before][rm.cur_op]++;
       cov.sample_episode(ep);
-      write(R_STATUS, 32'h000F_0000);             // W1C all flags
+      write(R_STATUS, 32'h001F_0000);             // W1C all flags
+    endtask
+
+    // Watchdog reset (doc/SOC_REGMAP.md "Watchdog reset"): the CPU is reset
+    // from RUN, IDLE, SLEEP or DEEP_SLEEP; afterwards STATUS.WDT_RST is set,
+    // RESUME / RESUME_DEEP are clear, SLEEP_CNT / IDLE_CNT count only the entry
+    // that happened before the request, WAKE_CAUSE is unchanged.
+    task automatic wdt_episode(pmu_wdt_episode ep);
+      logic [31:0] st, v;
+      int n;
+      ret_seen = 1'b0;
+      core.dirty = 1'b0;
+      env.bus_busy = 0;
+      write(R_DVFS, {30'b0, rm.cur_op});          // no DVFS sequence in this episode
+      rm.target = rm.cur_op;
+      if (ep.kind != 0) begin
+        core.mie = 3'b111;
+        write(R_WAKE_MASK, 32'h7);
+        write(R_CTRL, {23'b0, 1'b1, 6'b0, 2'(ep.kind - 1)});
+        @(posedge vif.clk);
+        core.execute_wfi();
+        wait_state_in(ST_IDLE, ST_OFF, ST_OFF, ST_OFF, ST_OFF, 2000);
+        if (ep.kind == 1) rm.idle_cnt++; else rm.sleep_cnt++;
+      end
+      repeat (ep.delay) @(posedge vif.clk);
+      env.wdt_busy = (ep.kind == 0 && ep.busy) ? ep.busy_len : 0;
+      wdt_retry_seen = 1'b0;
+      rst_rel_seen   = 1'b0;
+      // 16-cycle request pulse (dbg_wdt RST_PULSE)
+      vif.wdt_rst_req <= 1'b1;
+      repeat (16) @(posedge vif.clk);
+      vif.wdt_rst_req <= 1'b0;
+      // follow the sequence to the reset release and back to RUN
+      n = 0;
+      while (!(rst_rel_seen && vif.state == ST_RUN)) begin
+        @(posedge vif.clk);
+        if (++n > 6000) begin errors++; $error("watchdog reset did not complete (%s)", ep.sprint()); break; end
+      end
+      check(!(ep.kind == 0 && ep.busy) || wdt_retry_seen, $sformatf("no retry with the bus busy (%s)", ep.sprint()));
+      repeat (3) @(posedge vif.clk);
+      read(R_STATUS, st);
+      check(st[20] == 1'b1, $sformatf("WDT_RST not set (%s)", ep.sprint()));
+      check(st[16] == 1'b0 && st[17] == 1'b0, $sformatf("RESUME set after a watchdog reset (%s)", ep.sprint()));
+      check(st[18] == 1'b0 && st[19] == 1'b0, $sformatf("DVFS_DONE / ERR_DIRTY (%s)", ep.sprint()));
+      read(R_SLEEP_CNT, v);
+      check(v == rm.sleep_cnt, $sformatf("SLEEP_CNT %0d exp %0d (%s)", v, rm.sleep_cnt, ep.sprint()));
+      read(R_IDLE_CNT, v);
+      check(v == rm.idle_cnt, $sformatf("IDLE_CNT %0d exp %0d (%s)", v, rm.idle_cnt, ep.sprint()));
+      read(R_WAKE, v);
+      check(v[2:0] == rm.wake_cause, $sformatf("WAKE_CAUSE changed by a watchdog reset (%s)", ep.sprint()));
+      check(ret_seen == (ep.kind == 3), $sformatf("RAM retention %0d (%s)", ret_seen, ep.sprint()));
+      check(vif.pwr_sw_en && vif.pwr_good, "domain powered after the watchdog reset");
+      cov.wdt_hits[ep.kind]++;
+      if (wdt_retry_seen) cov.wdt_retry++;
+      write(R_STATUS, 32'h001F_0000);
     endtask
 
     task automatic run(int n_episodes);
       pmu_episode ep = new();
+      pmu_wdt_episode wep = new();
       env.run();
       fork
         core.run();
@@ -507,6 +603,12 @@ package pmu_tb_pkg;
         if (ep.randomize() != 1) $fatal(1, "episode randomize failed");
         if (!ep.wake_mask[ep.wake_src] || (ep.noise && ep.wake_mask[ep.noise_src]))
           $fatal(1, "episode constraints violated: %s", ep.sprint());
+        if ($urandom_range(5) == 0) begin
+          if (wep.randomize() != 1) $fatal(1, "watchdog episode randomize failed");
+          if ($test$plusargs("verbose")) $display("[tb_pmu] episode %0d: %s", i, wep.sprint());
+          wdt_episode(wep);
+          continue;
+        end
         if ($test$plusargs("verbose")) $display("[tb_pmu] episode %0d: %s", i, ep.sprint());
         episode(ep);
       end
@@ -536,7 +638,8 @@ module tb_pmu;
     .iso_en_o (vif.iso_en), .cpu_rst_no (vif.cpu_rst_n), .cpu_rst_ack_i (vif.cpu_rst_ack),
     .pwr_sw_en_o (vif.pwr_sw_en), .pwr_good_i (vif.pwr_good), .ram_ret_o (vif.ram_ret),
     .dvfs_sel_o (vif.dvfs_sel), .dvfs_active_i (vif.dvfs_active), .vsel_o (vif.vsel),
-    .irq_o (vif.irq), .state_o (vif.state)
+    .irq_o (vif.irq), .state_o (vif.state),
+    .wdt_rst_req_i (vif.wdt_rst_req)
   );
 
   // ---------------- testbench-level SVA ----------------
@@ -565,7 +668,7 @@ module tb_pmu;
     if (!$value$plusargs("episodes=%d", n_ep)) n_ep = 400;
     vif.rst_n = 1'b0;
     vif.req = 0; vif.we = 0; vif.addr = 0; vif.wdata = 0; vif.wstrb = 0;
-    vif.meip = 0; vif.mtip = 0; vif.msip = 0;
+    vif.meip = 0; vif.mtip = 0; vif.msip = 0; vif.wdt_rst_req = 0;
     vif.core_sleep = 0; vif.idle_ack = 0; vif.cache_clean = 1;
     vif.cg_ack = 1; vif.bus_idle = 1; vif.cpu_rst_ack = 1; vif.pwr_good = 1;
     vif.dvfs_active = 3'b100;

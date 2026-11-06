@@ -19,7 +19,8 @@
 //                window before the interconnect decode.
 // Unmapped addresses return SLVERR.
 // Interrupt controller sources:
-//   0 UART, 1 wake timer, 2 PMU (DVFS done), 3 external wake pin, 7:4 spare
+//   0 UART, 1 wake timer, 2 PMU (DVFS done), 3 external wake pin,
+//   4 debug error log, 5 watchdog bark, 7:6 spare
 // -----------------------------------------------------------------------------
 module aon_subsys #(
   parameter ROM_INIT       = "",
@@ -217,7 +218,7 @@ module aon_subsys #(
     .clk_i, .rst_ni, .d_i (ext_wake_i), .q_o (ext_wake_s)
   );
 
-  assign irq_src = {4'b0, ext_wake_s, pmu_irq, wtimer_irq, uart_irq};
+  assign irq_src = {2'b0, dbg_wdt_irq, dbg_err_irq, ext_wake_s, pmu_irq, wtimer_irq, uart_irq};
 
   aon_intc #(.N(8)) u_intc (
     .clk_i, .rst_ni, .src_i (irq_src), .irq_o (meip_o),
@@ -239,6 +240,7 @@ module aon_subsys #(
     .cg_en_o, .cg_ack_i, .bus_idle_i,
     .iso_en_o, .cpu_rst_no, .cpu_rst_ack_i, .pwr_sw_en_o, .pwr_good_i,
     .ram_ret_o (ram_ret),
+    .wdt_rst_req_i (dbg_wdt_rst_req),
     .dvfs_sel_o, .dvfs_active_i, .vsel_o,
     .irq_o (pmu_irq), .state_o (pmu_state_o),
     .dbg_state_o (dbg_pstate), .dbg_op_o (dbg_op), .dbg_evt_valid_o (dbg_evt_valid),
@@ -269,8 +271,8 @@ module aon_subsys #(
     .cpu_rst_req_o (dbg_wdt_rst_req), .wdt_irq_o (dbg_wdt_irq), .err_irq_o (dbg_err_irq)
   );
 
-  logic unused_dbg;   // connected in stage 3 step 4 (PMU reset receiver, intc sources)
-  assign unused_dbg = ^{dbg_wdt_rst_req, dbg_wdt_irq, dbg_err_irq, m_awaddr[31:14], m_araddr[31:14]};
+  logic unused_dbg;   // the debug blocks decode a 14-bit local address
+  assign unused_dbg = ^{m_awaddr[31:14], m_araddr[31:14]};
 
   logic unused_addr;
   assign unused_addr = ^{addr[S_UART][16:12], addr[S_MTIMER][16:12], addr[S_WTIMER][16:12],

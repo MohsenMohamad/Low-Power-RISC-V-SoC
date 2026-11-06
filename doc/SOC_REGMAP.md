@@ -76,7 +76,9 @@ Interrupt controller source numbers:
 | 1   | Wake timer (`STATUS.EXPIRED`)                     |
 | 2   | PMU (`STATUS.DVFS_DONE & IRQ_EN.DVFS_DONE`)       |
 | 3   | External wake pin `ext_wake_i` (synchronized level) |
-| 7:4 | Reserved, read as 0                               |
+| 4   | Debug error log (`dbg_errlog`: `STATUS & IRQ_EN != 0`, doc/DEBUG_SPEC.md section 7) |
+| 5   | Watchdog bark (`dbg_wdt`: `STATUS.BARK & CTRL.BARK_EN`, doc/DEBUG_SPEC.md section 8) |
+| 7:6 | Reserved, read as 0                               |
 
 All sources are level-sensitive. Each source is cleared at its origin.
 
@@ -153,11 +155,12 @@ STATUS fields:
 | [17]  | RESUME_DEEP | W1C  | ... and the power-down was DEEP_SLEEP |
 | [18]  | DVFS_DONE   | W1C  | A DVFS sequence completed |
 | [19]  | ERR_DIRTY   | W1C  | A power-down was refused because the CPU did not report both `cache_clean` (no dirty D-cache line) and `idle_ack`; the CPU was kept in IDLE instead |
+| [20]  | WDT_RST     | W1C  | The CPU was reset by a watchdog reset request (`dbg_wdt`, see "Watchdog reset"); set when the reset is released, together with clearing RESUME and RESUME_DEEP |
 
 PMU FSM state encoding: 0 RUN, 1 IDLE_REQ, 2 CLK_GATE, 3 IDLE, 4 DVFS_VUP,
 5 DVFS_SWITCH, 6 DVFS_VDN, 7 BUS_DRAIN, 8 ISO_ON, 9 PWR_OFF, 10 OFF,
 11 RET_EXIT, 12 PWR_ON, 13 RST_CLK_ON, 14 RST_CLK_OFF, 15 RST_REL,
-16 ISO_OFF, 17 CLK_UNGATE, 18 WAKE_REL.
+16 ISO_OFF, 17 CLK_UNGATE, 18 WAKE_REL, 19 WDT_GATE, 20 WDT_CHECK.
 
 Operating points: OP0 is the slowest clock and lowest voltage, OP2 the fastest
 and highest. OP2 is the reset point. The PMU raises `vsel` before it switches
@@ -179,6 +182,32 @@ From IDLE, execution continues after `wfi`; IDLE_CNT has advanced by one if
 the clock was gated. From SLEEP or DEEP_SLEEP, the CPU restarts at the boot ROM
 with STATUS.RESUME set (doc/BOOT_ABI.md). A wake event already pending at
 `wfi` returns immediately (no transition: IDLE_CNT and SLEEP_CNT unchanged).
+
+### Watchdog reset
+
+The watchdog (`dbg_wdt`, doc/DEBUG_SPEC.md section 8) requests a PD_CPU
+reset with a 16-cycle pulse on `cpu_rst_req_o`, which is wired to the PMU
+input `wdt_rst_req_i`. The PMU latches the rising edge and performs the
+reset from whichever stable state it reaches first (requests in transient
+states wait until the running sequence has reached RUN, IDLE or OFF):
+
+| From | Sequence |
+|---|---|
+| RUN (CPU running, possibly hung) | WDT_GATE: gate `clk_cpu` (`idle_req` is raised too) and wait for the gate acknowledge; WDT_CHECK: wait for the frozen bus status to settle, then, if the AXI bridge reports no transaction in flight (`bus_idle`), ISO_ON. Otherwise the clock is ungated (CLK_UNGATE -> WAKE_REL -> RUN) and the reset is retried, so a transaction is never cut |
+| IDLE (clock gated) | ISO_ON once the bridge is idle |
+| OFF (SLEEP / DEEP_SLEEP) | the wake path (RET_EXIT for DEEP_SLEEP, PWR_ON ...) without waiting for a wake event |
+
+then ISO_ON (isolation on, CPU reset asserted; `cache_clean` and `idle_ack`
+are not required: the D-cache contents are discarded) -> PWR_ON ->
+RST_CLK_ON -> RST_CLK_OFF -> RST_REL -> ISO_OFF -> CLK_UNGATE -> WAKE_REL ->
+RUN, the same reset release as a wake from OFF, without switching the
+domain off. At the reset release the PMU sets STATUS.WDT_RST and clears
+STATUS.RESUME / RESUME_DEEP, so the boot ROM cold-boots (doc/BOOT_ABI.md).
+SLEEP_CNT, IDLE_CNT and WAKE_CAUSE are not changed. Dirty D-cache lines are
+lost; the RAM keeps every value that was written back. The application
+image is not written at run time (its `.data` is copied out of the image by
+the startup code), so the boot ROM's image check passes after the reset and
+the application restarts.
 
 ## Wake timer: `0x2000_4000`
 

@@ -192,9 +192,9 @@ by the trace testbench. The event contract is asserted in the PMU
 
 | Port | Block | Domain | Description |
 |------|-------|--------|-------------|
-| `cpu_rst_req_o` | wdt | aon | PD_CPU reset request, high for `RST_PULSE` (16) clk_aon cycles |
-| `wdt_irq_o` | wdt | aon | bark (pre-timeout) interrupt, level, cleared by `STATUS.BARK` W1C or kick |
-| `err_irq_o` | errlog | aon | `|(STATUS & IRQ_EN)`, level |
+| `cpu_rst_req_o` | wdt | aon | PD_CPU reset request, high for `RST_PULSE` (16) clk_aon cycles; PMU input `wdt_rst_req_i` (audit B17), which performs the reset from RUN, IDLE, SLEEP or DEEP_SLEEP (doc/SOC_REGMAP.md "Watchdog reset") |
+| `wdt_irq_o` | wdt | aon | bark (pre-timeout) interrupt, level, cleared by `STATUS.BARK` W1C or kick; interrupt-controller source 5 (audit W23) |
+| `err_irq_o` | errlog | aon | `|(STATUS & IRQ_EN)`, level; interrupt-controller source 4 (audit W23) |
 
 ---
 
@@ -346,6 +346,11 @@ Bite sequence when `COUNT` reaches 0 with `EN=1`:
    starts with the watchdog stopped and re-arms it; with `LOCK=1` the watchdog
    keeps running instead and the boot code must kick it. Without `RST_EN`
    (log only) counting continues.
+5. The PMU receives the request (`wdt_rst_req_i`), resets PD_CPU without
+   cutting a bus transaction (doc/SOC_REGMAP.md "Watchdog reset"), sets
+   `PMU.STATUS.WDT_RST`, and the boot ROM cold-boots with `rst_cause` WDT
+   (doc/BOOT_ABI.md), keeping RAM, so the application restarts and can dump
+   the error log, counters and trace (all in PD_AON, not reset) post mortem.
 
 ## 9. Firmware (`fw/debug/`)
 

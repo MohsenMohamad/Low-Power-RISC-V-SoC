@@ -359,7 +359,10 @@ module tb_soc #(
   // ---------------- power-state transition coverage ----------------
   // PMU FSM arcs (from -> to); must match rtl/aon/pmu.sv. Written with
   // functions/case (not array constants) so Icarus Verilog accepts it too.
-  localparam int NARC = 24;
+  // Arcs 0..23: power management; 24..29: watchdog reset (reported as the
+  // separate group "wdt_arc", doc/SOC_REGMAP.md "Watchdog reset").
+  localparam int NARC = 30;
+  localparam int NARC_PM = 24;
   function automatic logic [9:0] arc(input int a);
     case (a)
       0: arc = {5'd0, 5'd1};    1: arc = {5'd1, 5'd2};    2: arc = {5'd1, 5'd18};
@@ -370,6 +373,8 @@ module tb_soc #(
      15: arc = {5'd10, 5'd12}; 16: arc = {5'd11, 5'd12}; 17: arc = {5'd12, 5'd13};
      18: arc = {5'd13, 5'd14}; 19: arc = {5'd14, 5'd15}; 20: arc = {5'd15, 5'd16};
      21: arc = {5'd16, 5'd17}; 22: arc = {5'd17, 5'd18}; 23: arc = {5'd18, 5'd0};
+     24: arc = {5'd0, 5'd19};  25: arc = {5'd19, 5'd20}; 26: arc = {5'd20, 5'd8};
+     27: arc = {5'd20, 5'd17}; 28: arc = {5'd3, 5'd8};   29: arc = {5'd8, 5'd12};
       default: arc = '1;
     endcase
   endfunction
@@ -381,7 +386,7 @@ module tb_soc #(
       9: stn = "PWR_OFF";     10: stn = "OFF";         11: stn = "RET_EXIT";
      12: stn = "PWR_ON";      13: stn = "RST_CLK_ON";  14: stn = "RST_CLK_OFF";
      15: stn = "RST_REL";     16: stn = "ISO_OFF";     17: stn = "CLK_UNGATE";
-     18: stn = "WAKE_REL";
+     18: stn = "WAKE_REL";    19: stn = "WDT_GATE";    20: stn = "WDT_CHECK";
       default: stn = "?";
     endcase
   endfunction
@@ -429,8 +434,9 @@ module tb_soc #(
     end
     // wake event accepted
     if (((dut.u_aon.u_pmu.state_q == 5'd3 && dut.u_aon.u_pmu.state_d == 5'd17) ||
-         (dut.u_aon.u_pmu.state_q == 5'd10 && dut.u_aon.u_pmu.state_d != 5'd10)) && !ep_aborted)
-      t_wake = $realtime;
+         (dut.u_aon.u_pmu.state_q == 5'd10 && dut.u_aon.u_pmu.state_d != 5'd10)) && !ep_aborted &&
+        !dut.u_aon.u_pmu.wdt_pend_q)
+      t_wake = $realtime;   // (a watchdog reset is not a wake: no latency sample)
     if (dut.u_aon.u_pmu.state_q == 5'd18 && dut.u_aon.u_pmu.state_d == 5'd0 && t_wake > 0) begin
       lat_add(1'b1, lp_kind, $realtime - t_wake);
       t_wake = 0;
@@ -453,6 +459,8 @@ module tb_soc #(
   int arc_hits [NARC];
   int illegal_arcs;
   bit ep_aborted;          // current low-power episode was refused / aborted
+  bit ep_wdt;              // current episode ended in a watchdog reset (not a wake)
+  int wdt_resets;          // completed watchdog reset sequences
   int aborted [4];         // by requested architectural state (1 IDLE, 2 SLEEP, 3 DEEP_SLEEP)
   int ps_hits [4][4];
   int ps_cur;
@@ -491,6 +499,13 @@ module tb_soc #(
       else
         $display("[tb] ABORTED transition RUN -> %s (power-down refused by PMU) @%0t", psn(req), $time);
     end
+    // Watchdog reset (doc/SOC_REGMAP.md): the return to RUN is a reset, not a
+    // completed power-state transition.
+    if (cov_s == 5'd19 || dut.u_aon.u_pmu.wdt_seq_q) ep_wdt = 1'b1;
+    if (checks_on && cov_s != state_prev && state_prev == 5'd15 && dut.u_aon.u_pmu.wdt_seq_q) begin
+      wdt_resets++;
+      $display("[tb] watchdog reset of PD_CPU @%0t", $time);
+    end
     if (cov_s == ST_RUN) begin
       cov_ps = 0;
     end
@@ -498,10 +513,10 @@ module tb_soc #(
     if (cov_s == ST_OFF)  cov_ps = dut.u_aon.ram_ret ? 3 : 2;
     if (cov_ps >= 0 && cov_ps != ps_cur) begin
       // the return to RUN after an aborted episode is not a completed transition
-      if (!(ep_aborted && cov_ps == 0)) ps_hits[ps_cur][cov_ps]++;
+      if (!((ep_aborted || ep_wdt) && cov_ps == 0)) ps_hits[ps_cur][cov_ps]++;
       ps_cur = cov_ps;
     end
-    if (cov_s == ST_RUN) ep_aborted = 1'b0;
+    if (cov_s == ST_RUN) begin ep_aborted = 1'b0; ep_wdt = 1'b0; t_wake = 0; end
     if (checks_on && cov_op != op_prev) op_hits[op_prev][cov_op]++;
     state_prev <= cov_s;
     op_prev    <= cov_op;
@@ -519,11 +534,15 @@ module tb_soc #(
     int hit = 0;
     $fdisplay(fd, "== PMU FSM transition coverage ==");
     for (int a = 0; a < NARC; a++) begin
-      $fdisplay(fd, "COV arc %s->%s %0d", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a]);
-      if (arc_hits[a] > 0) hit++;
+      if (a < NARC_PM)
+        $fdisplay(fd, "COV arc %s->%s %0d", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a]);
+      else
+        $fdisplay(fd, "COV wdt_arc %s->%s %0d", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a]);
+      if (arc_hits[a] > 0 && a < NARC_PM) hit++;
     end
-    $fdisplay(fd, "  arcs hit: %0d/%0d, illegal transitions: %0d", hit, NARC, illegal_arcs);
+    $fdisplay(fd, "  arcs hit: %0d/%0d, illegal transitions: %0d", hit, NARC_PM, illegal_arcs);
     $fdisplay(fd, "COV illegal transitions %0d", illegal_arcs);
+    $fdisplay(fd, "COV wdt resets %0d", wdt_resets);
     $fdisplay(fd, "== Architectural power-state transitions (completed only) ==");
     for (int f = 0; f < 4; f++)
       for (int t = 0; t < 4; t++)

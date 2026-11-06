@@ -27,7 +27,7 @@
 #define INTC_BASE           _U(0x20002000)
 #define PMU_BASE            _U(0x20003000)
 #define WTIMER_BASE         _U(0x20004000)
-#define DEBUG_BASE          _U(0x20008000)      /* 32 KB, not implemented: SLVERR */
+#define DBG_BASE            _U(0x20008000)      /* 32 KB debug range (doc/DEBUG_SPEC.md) */
 #define RAM_ALIAS_BASE      _U(0x30000000)      /* uncached alias of the RAM */
 #define RAM_UNCACHED_OFFSET (RAM_ALIAS_BASE - SOC_RAM_BASE)
 
@@ -62,11 +62,15 @@
 #define INTC_SRC_WTIMER     1
 #define INTC_SRC_PMU        2
 #define INTC_SRC_EXT_WAKE   3
-#define INTC_NSRC           4       /* bits 7:4 reserved */
+#define INTC_SRC_DBG_ERR    4       /* debug error log (STATUS & IRQ_EN) */
+#define INTC_SRC_WDT        5       /* watchdog bark */
+#define INTC_NSRC           6       /* bits 7:6 reserved */
 #define IRQ_UART            (_U(1) << INTC_SRC_UART)
 #define IRQ_WTIMER          (_U(1) << INTC_SRC_WTIMER)
 #define IRQ_PMU             (_U(1) << INTC_SRC_PMU)
 #define IRQ_EXT_WAKE        (_U(1) << INTC_SRC_EXT_WAKE)
+#define IRQ_DBG_ERR         (_U(1) << INTC_SRC_DBG_ERR)
+#define IRQ_WDT             (_U(1) << INTC_SRC_WDT)
 
 /* ------------------------------------------------------------ PMU */
 #define PMU_CTRL            0x00
@@ -94,7 +98,9 @@
 #define PMU_ST_RESUME_DEEP  (_U(1) << 17)
 #define PMU_ST_DVFS_DONE    (_U(1) << 18)
 #define PMU_ST_ERR_DIRTY    (_U(1) << 19)
-#define PMU_ST_W1C_ALL      (PMU_ST_RESUME | PMU_ST_RESUME_DEEP | PMU_ST_DVFS_DONE | PMU_ST_ERR_DIRTY)
+#define PMU_ST_WDT_RST      (_U(1) << 20)   /* CPU reset by the watchdog */
+#define PMU_ST_W1C_ALL      (PMU_ST_RESUME | PMU_ST_RESUME_DEEP | PMU_ST_DVFS_DONE | PMU_ST_ERR_DIRTY | \
+                             PMU_ST_WDT_RST)
 #define PMU_STATE_RUN       0
 #define PMU_STATE_IDLE      3
 

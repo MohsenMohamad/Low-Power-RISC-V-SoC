@@ -15,8 +15,10 @@
 < ^0x20003004: 0x00000200$
 > regs wtimer
 < ^wtimer\.ctrl +0x20004000: 0x00000000$
-> peek 0x20008000
-< ^ERR fault 0x20008000$
+> peek 0x2000b000
+< ^0x2000b000: 0xdb600401$
+> peek 0x2000c000
+< ^ERR fault 0x2000c000$
 # load a program by hand and run it: it prints "PASS" on the UART (the
 # testbench's end-of-run line) and stops:
 #   lui t0, 0x20000 ; li t1, 'P' ; sw t1, 0(t0) ; li t1, 'A' ; sw t1, 0(t0) ;
