@@ -1,116 +1,128 @@
-# Test Plan
+# Test plan
 
-Every feature of `doc/SPEC.md` mapped to its tests, coverage points, owning
-area and status. Areas: **CPU** (core, CSRs, Spike lockstep; Session 1),
-**caches** (Session 1), **SoC/PMU** (SoC top, PMU, CDC, UPF; Session 2),
-**firmware** (boot ROM, drivers, validation suite, monitor; Session 3),
-**UVM** (`verif/uvm`, Session 4), **debug** (this area), **bench** (lab automation, this area).
+Every feature of doc/SPEC.md mapped to the tests that check it, the
+regression step that runs them, and their status on the integrated SoC
+(stage 3, branch `stage3`). Steps are `make` targets; `make test` runs all
+of them (scripts/regress.py, required list `dv/regress/top.required`), each
+against its own required-test list in `dv/regress/`.
 
-Status: **planned** (not in the repository yet) / **implemented** (exists,
-not run or not passing here) / **passing** (run in this environment, see
-evidence). Statuses of other areas are what was observed when their branch
-was merged here, not their own claims.
+Status:
 
-Last full regression (`tools/regress.py --unit-seeds 3 --seeds 8`): 55 tests,
-54 pass, 1 fail (Session 3 `run_tests.py`: its Verilator lint step, see
-section 1); debug RTL line coverage 93.1 %, toggle 54.5 %, 50 of 52 cover
-properties hit (open: `c_ovf`, `c_stop_pwr`). Bench demo: 11/11 steps pass.
-
-Evidence runs (2026-11-05, Verilator 5.054, Spike 1.1.1-dev, riscv64-unknown-elf-gcc 13.2 and clang 18):
-`tools/regress.py` (debug suites + random stress seeds), `tools/run_tests.py`
-(Session 3, through the regression runner), `tools/bench/sequencer.py` (bench demo).
-
-How to run: `python3 tools/regress.py` (everything that runs on open-source
-tools), `make -C verif/debug run-test TEST=<t> SEED=<n>`, `python3 tools/run_tests.py`.
+- **pass**: run here and in CI by `make test`, every required result
+  passing (numbers in doc/INTEGRATION_REPORT.md "Stage 3", with the command
+  that reproduces each).
+- **partial**: run and passing, with a named gap (waiver or open item).
+- **not run**: cannot run on open-source tools here (reason given).
 
 ## 1. Architecture
 
-| Feature (SPEC.md) | Tests | Coverage points | Area | Status |
-|---|---|---|---|---|
-| RV32IM 5-stage pipeline, forwarding, hazard stalls, branch flush | Spike lockstep on random instruction streams; riscv-arch-test | per-instruction, hazard pairs, flush causes | CPU | planned (in-house core not in repository) |
-| Machine-mode CSRs | Spike lockstep; fw tests 1 csr_counters, 2 csr_machine_regs, 3 csr_mip_pending | CSR read/write forms | CPU, firmware | firmware tests passing on Spike (--priv=M, MSU); tests 2/3 not applicable on PicoRV32 (skip); in-house core planned |
-| Interrupts / exceptions | fw tests 10-16, 20-26; Spike lockstep | every mcause | CPU, firmware | passing on PicoRV32 SoC and Spike (14 access fault: Spike only) |
-| WFI | fw tests 25, 41 | wake masked / unmasked | CPU, firmware | passing (PicoRV32 SoC) |
-| I$/D$ 4 KB 2-way, write-back D$ | cache random traffic vs memory model, eviction/flush; fw tests 30-35 | hit/miss/evict/writeback per set/way | caches, firmware | fw tests passing (PicoRV32 bring-up caches); in-house caches planned |
-| Fence / flush before power-down | fw tests 31, 46; debug stress op `flush` + RAM CRC after sleep | flush kinds | caches, firmware, debug | passing |
-| AXI4-Lite interconnect | SVA protocol checker `verif/debug/common/dbg_axil_sva.sv` (debug slaves); interconnect TB | handshake orders, back-pressure, SLVERR | SoC/PMU, debug | debug slaves passing; interconnect planned |
-| Boot ROM 16 KB, RAM 128 KB retained | fw tests 42/43/74 | cold/resume/no-image paths | firmware | passing |
-| UART, mtime/mtimecmp, interrupt controller | fw tests 70-72, 20-24 | per register | firmware | passing |
-| Tech-cell wrappers with generic models | lint; debug uses `dbg_sync`, `dbg_ram_2c` wrappers | - | SoC/PMU, debug | debug wrappers passing lint; SoC wrappers (`rtl/tech`) lint FAIL here: 4 SYNCASYNCNET warnings in `tc_rst_sync.sv` under Verilator 5.054 (Session 3 `make lint`) |
-
-## 2. Power domains and clocks
-
-| Feature | Tests | Coverage points | Area | Status |
-|---|---|---|---|---|
-| PD_AON / PD_CPU, asynchronous clk_aon / clk_cpu, synchronisers | CDC review, SVA on handshakes; debug blocks: random clock ratios per seed (1/6..6) in every debug TB | clock ratio bins | SoC/PMU, debug | debug passing; SoC CDC planned |
-| RUN / IDLE / SLEEP / DEEP_SLEEP | fw tests 41-46, 60, 61; debug stress op `sleep`; bench `force-sleep`, `force-deep-sleep-at-op2`, `force-idle` | state x OPP matrix (fw test 61; stress `COV sleep_state x opp`) | firmware, SoC/PMU, debug, bench | passing |
-| Power-down / wake sequence (save, flush, WFI, gate, iso, off; wake, power_good, reset, iso off, clock, resume) | PMU formal (SymbiYosys); OFF-state corruption model; fw 42/43/46 | every PMU transition | SoC/PMU, firmware | fw passing on PicoRV32 PMU; formal planned |
-| DVFS 3 OPs, glitch-free mux, change only in IDLE | fw 50-52, 61; stress op `dvfs`; bench `force-dvfs-*` | OP->OP transitions | SoC/PMU, firmware, bench | passing |
-| UPF for both domains | UPF-aware simulation / static check | - | SoC/PMU | planned |
-
-## 3. Verification methodology items
-
-| Feature | Tests | Area | Status |
+| Feature (doc/SPEC.md) | Tests | Step | Status |
 |---|---|---|---|
-| SVA for AXI4-Lite | `dbg_axil_sva` bound to all debug slaves and the wrapper | debug | passing |
-| SVA for PMU sequencing, isolation clamps, CDC handshakes | PMU/CDC SVA | SoC/PMU | planned |
-| Class-based constrained-random TBs, cover properties, Verilator --timing | `verif/debug/{trace,evcnt,errlog,wdt,subsys}` | debug | passing |
-| UVM VIP (Xcelium/VCS/Questa) | `verif/uvm/` | UVM | planned (needs a commercial simulator; excluded from CI) |
-| Spike lockstep (DPI) | random instruction streams | CPU | planned |
-| riscv-arch-test | compliance suite | CPU | planned |
-| Cache random traffic vs reference model | cache TB | caches | planned (fw test 33 passing on bring-up caches) |
-| PMU formal (SymbiYosys), OFF-state corruption | formal | SoC/PMU | planned (OFF-state corruption model present in `pico_pd_cpu.sv`) |
-| cocotb smoke regression | discovered by `tools/regress.py` (cocotb Makefiles) | all | planned (none in repository yet) |
-| Python for regression / triage / coverage | `tools/regress.py`, `tools/triage.py`, `tools/cov_merge.py` | debug | passing |
-| Verilator lint clean | `make -C rtl/debug lint` (debug); `make lint` (SoC) | debug, SoC/PMU | debug passing; SoC lint FAIL (see section 1) |
+| RV32IM 5-stage pipeline, forwarding, hazard stalls, branch flush | Spike lockstep on 200 random programs + 2 directed; riscv-arch-test 3.9.1 (I, M, Zifencei, privilege); CPU coverage plan (ISA bins, hazard / flush cover properties) | `cosim`, `archtest`, `coverage` | pass (1 coverage hole waived with reason: `cp_wb_error`, dv/coverage_waivers.txt) |
+| Machine-mode CSRs, interrupts / exceptions, WFI | lockstep (exceptions, interrupts compared); arch-test privilege; validation suite tests 1-3, 10-16, 20-26, 41 on the SoC; Spike suite | `cosim`, `archtest`, `fw-suite`, `fw-spike` | pass |
+| 4 KB 2-way I-cache, 4 KB 2-way write-back D-cache | cache unit benches (random traffic vs memory model, eviction storms, maintenance, write-back errors; 8 seeds each); suite tests 30-37 on the SoC | `cachetest`, `fw-suite` | pass |
+| AXI4-Lite interconnect | protocol SVA in the demux / bridge / mux (SoC runs with SVA); debug-slave protocol checker `verif/debug/common/dbg_axil_sva.sv`; bus-error suite test 76 | `sim`, `fw-suite`, `dbg-unit` | pass |
+| 16 KB boot ROM, 128 KB RAM (retained) | boot test, suite tests 40, 42-48, 74; resume with dirty data; RAM CRC after SLEEP / DEEP_SLEEP (debug stress test) | `boot`, `boot-x`, `fw-suite`, `dbg-integ` | pass |
+| UART, machine timer, wake timer, interrupt controller, PMU | suite tests 70-76; monitor sessions; PMU unit bench | `fw-suite`, `fw-monitor`, `sim-pmu` | pass |
+| Technology cells only through wrappers | lint (every RTL file, -Wall); debug blocks use `tech_sync`, `rst_sync`, `tech_ram_2c` | `lint` | pass |
+| PicoRV32 not part of the design | `git grep -i picorv32` finds only doc/SPEC.md's rule and the reports | review | pass |
 
-## 4. Firmware
+## 2. Address map
 
-| Feature | Tests | Area | Status |
+| Feature | Tests | Step | Status |
 |---|---|---|---|
-| Boot ROM cold/resume detection, context restore | fw 40, 42-46, 74 | firmware | passing (PicoRV32) |
-| Drivers UART, timer, intc, PMU, cache | fw 70-73, 30-35 | firmware | passing |
-| Validation suite with pass/fail signature | `tools/run_tests.py` | firmware | passing except its lint step |
-| Sleep/wake stress loops | fw 60; debug stress | firmware, debug | passing |
-| UART monitor (peek/poke, run test by ID) | `platform/picorv32/tests/monitor_*.txt`; bench adapter | firmware, bench | passing |
-| in-house core build (`lpsoc`/`rv32m`) | build only | firmware, debug | builds (gcc and clang), not executed: core not in repository |
+| ROM / RAM / peripheral bases, RAM uncached alias | boot test (alias), suite tests 35, 76, monitor sessions (peek / poke through both windows) | `boot`, `fw-suite`, `fw-monitor` | pass |
+| Debug blocks at `0x2000_8000`, 32 KB (reserved upper 16 KB: SLVERR) | suite test 76 (IDs readable, `0x2000_C000` / `0x2000_FFFC` fault, unmapped debug offset faults, partial write faults); monitor sessions (`peek 0x20008000` / `0x2000b000` IDs, `peek 0x2000c000` fault); bench identity check | `fw-suite`, `fw-monitor`, `bench` | pass |
+| Unmapped addresses return SLVERR | suite test 76, boot test | `fw-suite`, `boot` | pass |
+| Reset vector, RAM base, cacheable ranges are parameters | lint of `soc_top` / `pd_cpu` parameters; co-simulation runs `cpu_top` with a different RAM window | `lint`, `cosim` | pass |
 
-## 5. Debug and validation infrastructure (this area)
+## 3. Register maps
 
-| Feature (DEBUG_SPEC.md) | Tests | Coverage points | Status |
+| Feature | Tests | Step | Status |
 |---|---|---|---|
-| Trace buffer: circular capture of PC/insn/timestamp | `trace_rand` (reference model, random clock ratios), `integ_drv`, `integ_divtest` | `c_wrap`, `c_fifo2`, `c_ret_trap` | passing |
-| Trace triggers start/stop on PC, exception, power change | `trace_rand` random trigger configs; `dbg_trace_sva` `a_start*`, `a_stop`, `a_armed_wait`; `integ_drv` (PC start/stop on real CPU) | `c_start_{none,pc,exc,pwr}`, `c_stop_{pc,exc,pwr}` | passing; `c_stop_pwr` not hit by the 3-seed regression (stop on power change exercised only through the model); open |
-| Trace freeze on error | `a_frz_exc`, `a_frz_err`, `a_frz_sticky`, `a_frz_no_new`; `subsys_wdt_chain`; `integ_drv`; `integ_hang` (frozen by watchdog, survives PD_CPU reset) | `c_frz_exc`, `c_frz_err` | passing |
-| Trace readable with PD_CPU off | `trace_pwroff`, `integ_drv` ("trace intact across SLEEP") | - | passing |
-| Event counters I$/D$ hit/miss, stall, time per state, wakes, DVFS | `evcnt_rand`, `evcnt_pwr` (cycle-exact AON model), `integ_drv`, bench power/DVFS steps | `c_wake_sleep`, `c_wake_dsleep`, `c_idle`, `c_dvfs_chg`, `c_clear_pend`, `c_ovf`, `c_frz_err` | passing; `c_ovf` (32-bit counter wrap) not reached in simulation: open, needs a directed test with a preloaded counter |
-| Counter freeze / clear | `evcnt_rand`, `a_frozen_hold` | - | passing |
-| Error log: last exception, power transition + result, sticky across sleep | `errlog_rand` (incl. power-off periods), `a_sticky`, `a_pwr_err`; `integ_crash_*` | `c_set`/`c_clr` per bit, `c_ovr`, `c_keep_first`, `c_res1..3` | passing |
-| Watchdog: bark, bite, log then PD_CPU reset, pause in sleep, lock | `wdt_rand`, `wdt_lock` (cycle-exact model), SVA `a_log_first`, `a_rst_pulse`, `a_pause`, `a_lock*`, `a_rst_stops`; `subsys_wdt_chain`; `integ_hang` (real reboot) | `c_bite_ack`, `c_bite_to`, `c_rst`, `c_bark`, `c_paused`, `c_lock`, `c_rst_stop` | passing |
-| Drivers (trace, counters, error log, watchdog) | `integ_drv` (17 checks on PicoRV32 SoC) | - | passing |
-| Crash handler + parseable dump | `integ_crash_illegal`, `integ_crash_misalign`, `integ_hang`; `dbg_decode.py` CRC check | - | passing |
-| Seeded random stress, reproducible | `integ_stress` x N seeds; same seed -> identical UART log (checked); fault injection (`--stress-flags 1`) | `COV op=*`, `COV sleep_state x opp` | passing |
-| Regression runner (discovery, parallel, timeout, summary) | `tools/regress.py` | - | passing |
-| Triage (signatures, failing seeds, replay) | `tools/triage.py` on fault-injected stress runs; `--replay` reproduces | - | passing |
-| Dump decoder + Spike divergence | `integ_divtest` vs `spike --log-commits` (match), and with `+tap_corrupt_pc` (first divergence reported) | - | passing |
-| Coverage merger | `tools/cov_merge.py` (Verilator .dat merged per source location, lcov, firmware COV lines) | - | passing |
-| CI | `.github/workflows/debug-regression.yml` | - | implemented (not run here: needs GitHub Actions) |
+| doc/SOC_REGMAP.md registers and access rules | suite tests 70-76 (incl. SLVERR on RO / partial writes, values kept); PMU unit bench (every PMU register against a reference model) | `fw-suite`, `sim-pmu` | pass |
+| doc/DEBUG_SPEC.md registers | debug unit benches (every block against a reference model, SLVERR rules, config lock while enabled); debug driver / wiring test on the SoC | `dbg-unit`, `dbg-integ` | pass |
 
-## 6. Bench automation
+## 4. Cache maintenance
 
-| Feature | Tests | Status |
-|---|---|---|
-| Monitor protocol adapter (Session 3 protocol) | bench demo, all steps | passing against simulation |
-| Firmware loading through the monitor with checksum | `load-dbgapp` (poke, peek read-back CRC, boot ROM header CRC) | passing against simulation |
-| Lab sequencer: power / DVFS forcing, timestamped capture, crash capture, triage hand-off | `tools/bench/testlists/sim_demo.toml` | passing against simulation |
-| Simulation bridge (pty) | `dbg_uart_pty_bridge` + `sim_bridge.py` | passing |
-| Board adapter | `tools/bench/board.py` FPGA template | implemented (template; no board yet) |
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| Only `mcachectl`, no memory-mapped controller | suite tests 30-36 | `fw-suite` | pass |
+| Clean / flush complete only after every write response; errors reported | D-cache bench phases 4a / 4b (failing write responses), mutants `dc_clean_on_error`, `dc_evict_err_lost` | `cachetest`, `mutation` | pass |
+| Write-back error path in firmware | D-cache bench only: the SoC RAM never errors while the CPU runs | `cachetest` | partial (open item: not provokable at SoC level) |
+| Cache statistics from the debug event counters | suite test 37 (exact D-cache hit / miss counts, I-cache events, `cache_stats()` equals the counters); cache benches check every hit / miss pulse against the reference model; debug wiring test | `fw-suite`, `cachetest`, `dbg-integ` | pass |
 
-## 7. Integration items for merge
+## 5. CPU <-> SoC interface
 
-* Debug blocks at `DBG_BASE = 0x4002_0000` on the SoC AXI interconnect, ports
-  per DEBUG_SPEC section 4 (CPU retire/trap, cache events, PMU state/events,
-  `cpu_rst_req_o` to the PMU, `irq_o` to the interrupt controller).
-* Replace `dbg_sync` / `dbg_ram_2c` bodies with the SoC wrappers.
-* Rerun `integ_*` tests on the in-house core (expected: exact trap causes
-  instead of the PicoRV32 IRQ-bit mapping of the preview).
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| idle_req / idle_ack / cache_clean handshake, power-down only with both | PMU SVA (`a_iso_on_bus_idle`, `a_gate_needs_handshake`) proven (k-induction); lockstep bench drives random handshakes with interrupt races; dirty-cache refusal (pm_test, boot test, suite) | `formal`, `cosim`, `sim`, `fw-suite` | pass |
+| "Caches idle" never substitutes for cache_clean | D-cache bench `cache_clean` contract checks; mutant `dc_clean_during_evict` | `cachetest`, `mutation` | pass |
+| WFI resumes on pending & enabled (mie) interrupts; WAKE_MASK | suite test 48; PMU unit bench masked-noise episodes; SVA `a_wake_masked`, `a_masked_holds` proven | `fw-suite`, `sim-pmu`, `formal` | pass |
+| mtime export with a safe CDC | `cdc_snapshot` proof + cover; suite timer tests | `formal`, `fw-suite` | pass |
+| Interrupts synchronized exactly once | review (doc/CPU_SOC_INTERFACE.md), OFF-state corruption runs | `sim` | pass |
+| Debug observability ports (retire / trap, cache events, stall) | `cpu_top` SVA (retire / trap exclusive, no retire after trap, hit / miss exclusive); cache benches; debug wiring test (instruction words = memory, mcause / mepc / mtval for exception and interrupt, exact D-cache counts, stall counter) | `sim`, `cachetest`, `dbg-integ` | pass |
+
+## 6. Power domains and clocks
+
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| RUN / IDLE / SLEEP / DEEP_SLEEP, all transitions | pm_test (all 6 transitions, 23/24 PMU arcs), suite power tests 41-48, 50-52, 60-61; PMU unit bench (all arcs); formal cover | `sim`, `sim-x`, `fw-suite`, `sim-pmu`, `formal` | partial (IDLE_REQ -> WAKE_REL waived at SoC level, covered by unit bench and formal cover) |
+| Power-down / wake sequencing, isolation, reset | PMU SVA proven; OFF-state corruption model (random and 4-state X); isolation negative test | `formal`, `sim`, `sim-x`, `sim-neg` | pass |
+| DVFS: 3 operating points, glitch-free mux, change only in IDLE | `dvfs_mux` proof; suite tests 50-52; pm_test all 6 pairs; PMU SVA `a_dvfs_switch_gated` | `formal`, `fw-suite`, `sim` | pass |
+| PMU debug interface: stable state, transition events, state rate (audit B16, W24) | PMU SVA `a_dbg_state_rate`, `a_dbg_evt_*`, `a_dbg_ps_*` (proven); debug unit benches; wiring test (wake / transition / DVFS counts, time in state, error-log event) | `formal`, `sim-pmu`, `dbg-unit`, `dbg-integ` | pass |
+| Watchdog PD_CPU reset through the PMU (audit B17) | PMU SVA `a_wdt_*` (proven); PMU unit bench watchdog episodes from RUN (with retry on a busy bus), IDLE, SLEEP, DEEP_SLEEP; selftest mutants; SoC hang test (real reboot, boot ROM `rst_cause` WDT, post-mortem dump); bench reboot | `formal`, `sim-pmu`, `selftest`, `dbg-integ`, `bench` | pass |
+| IEEE 1801 UPF | none | - | not run (no open-source UPF-aware tool; `upf/soc_top.upf` unchecked) |
+
+## 7. Boot and resume ABI
+
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| Context save layout, magic, CRC, image header, PMU scratch registers | boot test (CRC-rejected resume -> cold boot), suite tests 40-46, 74; fw-neg ROM image rejection (bad CRC, unaligned entry) | `boot`, `fw-suite`, `fw-neg` | pass |
+| Watchdog cold boot (image unchanged, `rst_cause` WDT) | SoC hang test; bench load + watchdog reboot | `dbg-integ`, `bench` | pass |
+
+## 8. Firmware
+
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| Boot ROM cold / resume detection, context restore | boot test, suite | `boot`, `fw-suite` | pass |
+| Drivers: UART, timers, intc, PMU, cache maintenance, debug blocks | suite tests 70-76, 37; debug wiring test (debug drivers, error-log / watchdog interrupts at intc sources 4 / 5) | `fw-suite`, `dbg-integ` | pass |
+| Validation suite (self-checking) | 46 tests on the SoC, every test required; on Spike (`--priv=M`, `MSU`) | `fw-suite`, `fw-spike` | pass |
+| Sleep / wake stress loops | suite test 60; debug stress test (4 seeds, transitions must complete) | `fw-suite`, `dbg-integ` | pass |
+| UART monitor: peek / poke, run test by ID | scripted monitor sessions (application, boot ROM); bench flow through the pty | `fw-monitor`, `bench` | pass |
+
+## 9. Verification methodology and rules
+
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| SVA for AXI4-Lite, PMU sequencing, isolation, CDC | RTL SVA in every SoC simulation; debug AXI checker | `sim`, `dbg-unit` | pass |
+| Class-based constrained-random SV benches, cover properties, Verilator --timing | cache benches, PMU unit bench, debug unit benches | `cachetest`, `sim-pmu`, `dbg-unit` | pass (debug cover properties 50 of 52 hit: `c_ovf`, `c_stop_pwr` open, see open items) |
+| UVM VIP under verif/uvm on a commercial simulator | none (UVM branch not merged) | - | not run (needs Xcelium / VCS / Questa; not part of this stage) |
+| CPU: Spike lockstep, riscv-arch-test | as section 1 | `cosim`, `archtest` | pass |
+| Caches: random traffic vs reference model | as section 1 | `cachetest` | pass |
+| PMU: formal + cover, OFF-state corruption, full transition coverage | as section 6 | `formal`, `sim`, `sim-x`, `sim-pmu` | pass |
+| Python only for regression, triage, coverage merging | `scripts/`, `tools/triage.py`, `tools/dbg_decode.py`, `tools/cov_merge.py` used by `dbg-unit` / `dbg-integ` / `bench` | - | pass |
+| Verilator lint clean | SoC, CPU, debug blocks at every trace depth | `lint` | pass |
+| Nonzero exit on any failure at every level | every runner + check_results; selftest of the checkers | `selftest` | pass |
+| Required-test lists, unknown / missing / skipped = failure | `scripts/check_results.py` for every step; selftest cases | `selftest` | pass |
+| Aborted transitions never pass or count as coverage | SoC bench ABORTED reporting; `pm_idle` / `pm_suspend` results; debug stress / driver test; bench force-power; negative tests `fw-neg/soc-idle-abort`, `dbg-neg/stress-abort`, `dbg-neg/drv-abort`, `selftest/bench/power-aborted` | `sim`, `fw-neg`, `dbg-integ`, `selftest` | pass |
+| Coverage holes fail unless waived | `check_soc_cov.py`, `cov_report.py` with waiver files | `sim`, `coverage` | pass |
+| Mutation: survivors / build failures fail | `scripts/mutation.py` | `mutation` | pass |
+| Every checker has a negative test | `make selftest` (incl. bench, dump decoder), `sim-neg`, `fw-neg`, debug bench negatives (`neg/trace_ts_zero`, `neg/axil_rst`), `dbg-neg/*` | `selftest`, `sim-neg`, `fw-neg`, `dbg-unit`, `dbg-integ` | pass |
+| Every proof has a cover run | `scripts/run_formal.py` (each job paired) | `formal` | pass |
+| Assertions not disabled by what they check | `dbg_axil_sva` `a_rst_valid` fixed (`disable iff (1'b0)`), negative test `neg/axil_rst` | `dbg-unit` | pass |
+| Published numbers reproducible | commands next to every number in doc/INTEGRATION_REPORT.md | - | pass |
+| One setup script, exact versions | `scripts/setup_toolchain.sh --check` | `toolchain` | pass |
+| FPGA build | none | - | not run (later stage) |
+
+## 10. Debug and validation infrastructure (doc/DEBUG_SPEC.md)
+
+| Feature | Tests | Step | Status |
+|---|---|---|---|
+| Trace buffer: capture, triggers, freeze, readout with PD_CPU off, every depth (16 / 32 / 64 / 128) | `trace_rand_d*`, `trace_pwroff_d*` (reference model incl. timestamp windows), trace SVA; wiring test (PC triggers, freeze on exception, trap entries, intact across SLEEP); divergence test vs Spike | `dbg-unit`, `dbg-integ` | pass |
+| Event counters (cache, stall, time per state, wakes, DVFS, transitions) | `evcnt_rand`, `evcnt_pwr`; wiring test; suite test 37; bench power / DVFS steps | `dbg-unit`, `dbg-integ`, `fw-suite`, `bench` | partial (32-bit counter overflow cover `c_ovf` not reached) |
+| Error log (exception, power transition + result, watchdog, software errors, sticky) | `errlog_rand`; wiring test (exception records, SLEEP -> RUN event, interrupt source 4); crash dumps | `dbg-unit`, `dbg-integ` | pass |
+| Watchdog (bark, bite, log, PD_CPU reset, pause, lock) | `wdt_rand`, `wdt_lock`, `subsys_wdt_chain`; wiring test (bark at source 5); hang test (real reset); bench reboot | `dbg-unit`, `dbg-integ`, `bench` | pass |
+| Crash handler, dump format, decoder | expected-crash tests (dump decoded, CRC, mcause / mtval checked); hang post-mortem; decoder negative tests | `dbg-integ`, `selftest` | pass |
+| Seeded random stress, reproducible | 4 seeds; same-seed reproducibility; fault-injection seeds + triage (signature groups, replay) | `dbg-integ` | pass |
+| Bench automation through the monitor (load, power / DVFS forcing, crash capture) | `make bench` (12 steps) against the SoC simulation through the pty; bench negative tests | `bench`, `selftest` | pass |
