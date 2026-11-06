@@ -441,30 +441,55 @@ crash path and triage.
 
 ## 12. Bench and monitor protocol
 
-The bench uses the Session 3 UART monitor as implemented on branch
-`claude/zealous-planck-kdx8mw` (`fw/app/monitor.c`, `fw/app/main.c`,
-`doc/firmware.md`). All protocol details are in one module,
-`tools/bench/monitor_adapter.py`; no other bench file knows the protocol.
+The bench (`tools/bench`) drives a target through main's UART monitor
+(`fw/app/monitor.c`, `fw/app/main.c`, `fw/app/app_cmds.c`, the debug
+application's `dbg` / `dbgrun`). All protocol details are in one module,
+`tools/bench/monitor_adapter.py`; all addresses in `tools/bench/soc_map.py`
+(from doc/SOC_REGMAP.md and this document); everything board-specific in
+`tools/bench/board.py`.
 
 * prompt `mon> ` (`zzz> ` before a UART-wake sleep); input is echoed; output
   lines end with `\r\n`; errors start with `ERR`
-* `peek <addr|blk.reg> [n]` → `0x%08x: 0x%08x` per word; `poke <addr> <v>` → `OK`;
-  `regs <blk>`; `go <addr>`; `reset` (boot ROM and its reduced monitor)
-* application: `run <id|all>` (`[TEST n] name PASS|FAIL|SKIP`, `SUITE RESULT:`),
-  `info`, `list`, `sleep <idle|sleep|deep> <ticks|uart>` (`woke: result ...`),
-  `opp <0..2>`, `exit [code]`
-* debug application additions: `dbg`, `dbgrun` (`DBGRUN RESULT: PASS|FAIL`)
-* stream alignment: the adapter sends an unknown command with a unique marker
-  and waits for `ERR unknown command '<marker>'`, so stale prompts and boot
-  banners never shift command/response pairs.
+* `peek <addr> [n]` -> `0x%08x: 0x%08x` per word: the bench requires every
+  line to carry the address it asked for; `poke <addr> <v>` -> `OK`;
+  `regs <blk>`; `go <addr>`
+* `sleep <idle|sleep|deep> <ticks|uart>` -> `woke: result r, rst_cause c,
+  wake_cause w, sleep_cnt +n`, plus `ERR transition ABORTED|failed` when the
+  transition did not complete; `opp <0..2>` -> `opp n`; `exit [code]`
+* `dbg`, `dbgrun <t> <seed> [iters] [flags]` -> `DBGRUN RESULT: PASS|FAIL`
+* stream alignment: the adapter first sends a lone line end and waits for a
+  prompt (bytes typed while the target boots can overflow the 8-entry UART
+  RX FIFO and lose the line end), then an unknown command with a unique
+  marker, and waits for `ERR unknown command '<marker>'`.
 
-The monitor has no load or checksum command, so `tools/bench/loader.py`
-writes images with `poke`, reads them back with `peek <addr> 64` and compares
-CRC-32 with the host; the boot ROM checks the image header CRC again on
-`reset`. Forced power transitions write PMU registers (`WAKE_EN`,
-`DVFS_OP`) with `poke` and use the monitor's `sleep` / `opp` to execute the
-WFI; each transition is checked in the PMU counters, the debug event
-counters (wake count, time in state, DVFS count) and the error log.
+There is no reset, load or checksum command. Loading
+(`tools/bench/loader.py`): the image (doc/BOOT_ABI.md format) is checked on
+the host, written with `poke` through the RAM's uncached alias
+(`0x3000_0000`: no D-cache clean per word, no stale cached copy), read back
+with `peek <addr> 64` and compared by CRC-32. A reboot is a watchdog reset
+of PD_CPU (`Monitor.reboot`: the bench programs `dbg_wdt` with a short
+timeout and RST_EN, section 8 and doc/SOC_REGMAP.md "Watchdog reset"); the
+boot ROM then checks the image header CRC and starts the image.
+
+Steps (`tools/bench/sequencer.py`, test list
+`tools/bench/testlists/sim_demo.toml`): identity check (exact debug IDs;
+the PMU has no ID register, so CTRL.LP_EN, STATUS state RUN, VSEL = CUR_OP
+and the debug PSTATE are checked), firmware load, debug tests, forced
+power-state transitions (the monitor's `sleep`; the step passes only if the
+transition completed and the PMU counter, the debug transition / wake
+counts, the time in the state and the error log's last transition all
+agree), DVFS changes (PMU TARGET_OP written with `poke`, the monitor's `opp`
+executes the WFI; CUR_OP, VSEL, debug DVFS count, PSTATE checked), expected
+crash capture (dump decoded with `tools/dbg_decode.py`, then a reboot), a
+final dump. Every received line is captured with a timestamp; per-step
+artifacts and `results.json` (`tools/triage.py` format) plus
+`results_check.json` (required list `dv/regress/bench.required`).
+
+Simulation target (`tools/bench/sim_bridge.py`, `make bench`): the SoC
+simulation `sim/tb_soc.sv` built with `-DBENCH_PTY` (`make bench-sim`)
+connects the UART to a host pseudo-terminal
+(`verif/debug/integ/dbg_uart_pty_bridge.sv`, `uart_pty.c`); it starts in
+the boot ROM monitor with no image, exactly as a board after power-on.
 
 ## 13. Regression
 

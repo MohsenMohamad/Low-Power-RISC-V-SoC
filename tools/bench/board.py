@@ -21,7 +21,7 @@ except ImportError:                   # pragma: no cover
 
 class BoardProfile:
     def __init__(self, name, port=None, baud=115200, bytesize=8, parity="N", stopbits=1,
-                 reset_cmd=None, program_cmd=None, power_cycle_cmd=None, dbg_base=0x4002_0000,
+                 reset_cmd=None, program_cmd=None, power_cycle_cmd=None,
                  boot_timeout=60, cmd_timeout=60, notes=""):
         self.name = name
         self.port = port                      # e.g. /dev/ttyUSB1, or set by the sim bridge
@@ -30,12 +30,14 @@ class BoardProfile:
         self.reset_cmd = reset_cmd            # host command that resets the board (list)
         self.program_cmd = program_cmd        # host command that loads the bitstream (list)
         self.power_cycle_cmd = power_cycle_cmd
-        self.dbg_base = dbg_base
         self.boot_timeout = boot_timeout
         self.cmd_timeout = cmd_timeout        # scale up for slow targets (simulation)
         self.notes = notes
 
     def open_port(self, timeout=0.05):
+        if self.name == "sim":                # the simulation's pty (tools/bench/sim_bridge.py)
+            import sim_bridge
+            return sim_bridge.PtyPort(self.port, timeout)
         if serial is None:
             raise RuntimeError("pyserial is not installed (pip install pyserial)")
         if not self.port:
@@ -59,11 +61,12 @@ class BoardProfile:
         return self._run(self.reset_cmd, "reset")
 
 
-# Verilator simulation through the pseudo-terminal bridge (sim_bridge.py sets
-# the port). The bit rate of a pty is irrelevant; the simulated UART runs at
-# clk_aon / UART_DIV. Simulation is slow: generous timeouts.
-SIM = BoardProfile("sim", baud=115200, dbg_base=0x4F00_4000, boot_timeout=600, cmd_timeout=600,
-                   notes="PicoRV32 integration preview, verif/debug/integ")
+# Verilator simulation of the SoC (sim/tb_soc.sv) through the pseudo-terminal
+# bridge (sim_bridge.py sets the port). The bit rate of a pty is irrelevant;
+# the simulated UART runs at clk_aon / UART_DIV. Simulation is slow: generous
+# timeouts. Addresses come from soc_map.py (doc/SOC_REGMAP.md).
+SIM = BoardProfile("sim", baud=115200, boot_timeout=900, cmd_timeout=1800,
+                   notes="SoC simulation, sim/tb_soc.sv built with the UART pty bridge")
 
 # Template for an FPGA board. Fill in and rename. [TEMPLATE]
 FPGA_TEMPLATE = BoardProfile(
@@ -73,7 +76,6 @@ FPGA_TEMPLATE = BoardProfile(
     reset_cmd=None,                             # e.g. ["openocd", "-f", "board.cfg", "-c", "init; reset; exit"]
     program_cmd=None,                           # e.g. ["openFPGALoader", "-b", "<board>", "soc.bit"]
     power_cycle_cmd=None,                       # e.g. a USB relay command
-    dbg_base=0x4002_0000,
     boot_timeout=10, cmd_timeout=30,
     notes="template only: no board is targeted yet")
 

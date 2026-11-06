@@ -88,8 +88,21 @@ class Monitor:
         marker; the monitor answers "ERR unknown command '<marker>'" and a
         prompt, so everything before it (boot banner, stale prompts) is
         discarded and the next command starts on a clean stream."""
+        # First a lone line end: it terminates whatever partial line the
+        # monitor holds (bytes sent while the target was still booting are
+        # lost when they overflow the 8-entry UART RX FIFO, including the line
+        # end) and is answered with a prompt; only then the marker line.
+        t_end = time.time() + timeout
+        while True:
+            self.port.write(b"\r")
+            try:
+                self.read_until([PROMPT], min(10.0, max(0.1, t_end - time.time())))
+                break
+            except MonitorError:
+                if time.time() > t_end:
+                    raise
         marker = "sync%06d" % (int(time.time() * 1000) % 1000000)
-        self.port.write(b"\r" + marker.encode() + b"\r")
+        self.port.write(marker.encode() + b"\r")
         self.read_until([("unknown command '%s'" % marker).encode()], timeout)
         self.read_until([PROMPT], timeout)
 

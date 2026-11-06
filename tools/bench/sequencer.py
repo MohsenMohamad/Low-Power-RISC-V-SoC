@@ -267,10 +267,13 @@ def main(argv=None):
                 status = "PASS" if ok else "FAIL"
             except (MonitorError, loader.LoadError, OSError) as ex:
                 status, detail = "FAIL", "%s: %s" % (type(ex).__name__, str(ex)[:200])
-                try:
-                    b.mon.sync(timeout=prof.cmd_timeout)
-                except MonitorError:
-                    status, detail = "TIMEOUT", detail + " (target not responding)"
+                if sim and not sim.alive():
+                    status, detail = "TIMEOUT", detail + " (simulation ended: %s)" % sim.last_words()
+                else:
+                    try:
+                        b.mon.sync(timeout=prof.cmd_timeout)
+                    except (MonitorError, OSError):
+                        status, detail = "TIMEOUT", detail + " (target not responding)"
             dt = time.time() - t
             safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
             fn = os.path.join(art, "%s_s%s.uart" % (safe, seed if seed is not None else 0))

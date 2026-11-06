@@ -64,6 +64,18 @@ module tb_soc #(
   wire  [2:0] clk_op  = {clk_op2, clk_op1, clk_op0};
   logic       por_n   = 1'b0;
   logic       uart_rx = 1'b1;
+  logic       uart_rx_pin;
+`ifdef BENCH_PTY
+  // Lab bench build (make bench-sim): the UART is also connected to a host
+  // pseudo-terminal (verif/debug/integ/dbg_uart_pty_bridge.sv, +pty), so
+  // tools/bench drives the simulated SoC like a board's serial port. Both RX
+  // sources idle high; only one is used in a run.
+  logic       pty_rxd;
+  dbg_uart_pty_bridge #(.DIV(8)) u_pty (.clk(clk_aon), .uart_txd(uart_tx), .uart_rxd(pty_rxd));
+  assign uart_rx_pin = uart_rx & pty_rxd;
+`else
+  assign uart_rx_pin = uart_rx;
+`endif
   logic       uart_tx;
   logic       ext_wake = 1'b0;
   logic [1:0] vsel;
@@ -81,7 +93,7 @@ module tb_soc #(
     .ROM_INIT (ROM_INIT)
   ) dut (
     .clk_aon_i (clk_aon), .clk_op_i (clk_op), .por_ni (por_n), .test_en_i (1'b0),
-    .uart_rx_i (uart_rx), .uart_tx_o (uart_tx), .ext_wake_i (ext_wake), .vsel_o (vsel)
+    .uart_rx_i (uart_rx_pin), .uart_tx_o (uart_tx), .ext_wake_i (ext_wake), .vsel_o (vsel)
   );
 
   // ---------------- boot ROM image ----------------
