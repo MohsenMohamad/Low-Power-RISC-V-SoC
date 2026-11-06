@@ -37,6 +37,9 @@ STEPS = [
     ("fw/suite-spike",       "make fw-spike"),
     ("fw/monitor",           "make fw-monitor"),
     ("fw/negative",          "make fw-neg"),
+    ("debug/unit",           "make dbg-unit"),
+    ("debug/soc",            "make dbg-integ"),
+    ("debug/bench",          "make bench"),
     ("pmu/unit",             "make sim-pmu"),
     ("formal",               "make formal"),
     ("mutation",             "make mutation"),
@@ -65,8 +68,8 @@ def main():
         results.append({"id": sid, "status": status, "seconds": round(dt), "log": os.path.relpath(log, ROOT)})
         summary = [l.rstrip() for l in open(log, errors="replace")
                    if l.startswith(("COSIM:", "ARCHTEST:", "CACHETEST", "UNITTEST", "COVERAGE:", "RESULTS",
-                                    "SOC-COV", "SOC-NEG:", "FW-RUN:", "  fw-neg", "  monitor ", "  spike --priv", "FORMAL:", "MUTATION:", "SELFTEST:", "TOOLCHAIN:",
-                                    "[tb] TEST", "== SoC lint", "== CPU lint", "  coverage holes"))]
+                                    "SOC-COV", "SOC-NEG:", "FW-RUN:", "DBG-UNIT:", "BENCH ", "  PASS dbg", "  FAIL dbg", "  fw-neg", "  monitor ", "  spike --priv", "FORMAL:", "MUTATION:", "SELFTEST:", "TOOLCHAIN:",
+                                    "[tb] TEST", "== SoC lint", "== CPU lint", "== debug lint", "  coverage holes"))]
         for l in summary[-12:]:
             print("   " + l)
         print(f"   -> {status} ({dt:.0f} s, log {os.path.relpath(log, ROOT)})", flush=True)

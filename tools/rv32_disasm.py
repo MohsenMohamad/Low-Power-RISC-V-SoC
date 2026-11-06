@@ -100,7 +100,7 @@ def disasm(w, pc=0):
                 src = str(rs1) if f3 >= 5 else r(rs1)
                 return "%s %s, %s, %s" % (names[f3], r(rd), cn, src)
     if op == 0x0B:
-        return "picorv32.custom0 0x%08x" % w     # PicoRV32 IRQ instructions
+        return "custom-0 0x%08x" % w            # not RV32IM: unknown on this core
     return ".word 0x%08x" % w
 
 
