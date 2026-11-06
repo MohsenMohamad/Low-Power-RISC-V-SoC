@@ -410,21 +410,34 @@ The CRC-32 (IEEE) covers the bytes of every line from `BEGIN` up to the line bef
 
 ## 11. Random stress test
 
-`fw/debug/app/dbg_app.c` (test 1): xorshift32 PRNG seeded from the run
-control; the seed is printed first (`STRESS seed=0x...`). Each iteration
-draws an operation: compute (two formulations of a mul/div/rem kernel must
-agree), memory traffic (pattern write/readback, compared through the
-uncached alias after a D$ clean), cache maintenance (clean/flush/invalidate,
-then buffer CRC), timer interrupt (handler count), sleep/wake in IDLE, SLEEP
-or DEEP_SLEEP through `pm_suspend` (wake by timer, RAM CRC after wake),
-DVFS change through `pm_set_opp`. All random decisions come from the PRNG,
-so a seed reproduces the run exactly (identical UART logs, checked); every
-iteration prints `I <n> op=<name> arg=0x..`. The watchdog runs during the
-test (kicked per iteration, paused in SLEEP / DEEP_SLEEP). The run ends with
-`COV ...` functional-coverage lines and `STRESS PASS seed=...`, or a crash
-dump. `FLAGS` bit 0: with probability 1/16 per iteration an illegal
-instruction, misaligned load, load access fault (where the CPU has them) or
-a hang is injected, to exercise the crash path and triage.
+`fw/debug/dbg_app.c` (test 1): xorshift32 PRNG seeded from the run control
+(host argument 0); the seed is printed first (`STRESS seed=0x...`). Each
+iteration draws an operation: compute (two formulations of a mul/div/rem
+kernel must agree), memory traffic (pattern write/readback, compared through
+the uncached alias after a D-cache clean), cache maintenance (clean / flush /
+I-cache invalidate through `mcachectl`, then buffer CRC), timer interrupt
+(handler count), sleep / wake in IDLE, SLEEP or DEEP_SLEEP through
+`pm_suspend` (wake by the machine timer, RAM CRC after wake), DVFS change
+through `pm_set_opp`.
+
+A sleep operation passes only if the requested transition completed:
+`PM_WOKE` for IDLE, `PM_RESUMED` for SLEEP / DEEP_SLEEP, confirmed by the
+PMU's IDLE_CNT / SLEEP_CNT advancing by one. An aborted transition
+(`PM_ABORTED`) or any other result fails the run (doc/SPEC.md). The
+state x operating-point coverage (`COV sleep_state=.. opp=..`) is recorded
+only after the transition completed. Flag bit 2 (`DBG_F_NEG_ABORT`, negative
+test `dbg-neg/stress-abort`) makes every sleep see an already pending wake;
+the run must then fail.
+
+All random decisions come from the PRNG, so a seed reproduces the run
+exactly (the operation and coverage lines of two runs with the same seed are
+compared, `dbg/stress-repro`); every iteration prints
+`I <n> op=<name> arg=0x..`. The watchdog runs during the test (kicked per
+iteration, paused in SLEEP / DEEP_SLEEP). The run ends with `COV ...`
+functional-coverage lines and `STRESS PASS seed=...`, or a crash dump. Flag
+bit 0: with probability 1/16 per iteration an illegal instruction,
+misaligned load, load access fault or a hang is injected, to exercise the
+crash path and triage.
 
 ## 12. Bench and monitor protocol
 

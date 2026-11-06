@@ -32,6 +32,8 @@ typedef struct {
 
 #define DBG_F_INJECT        (1u << 0)       /* random fault injection     */
 #define DBG_F_QUIET         (1u << 1)       /* no per-iteration lines     */
+#define DBG_F_NEG_ABORT     (1u << 2)       /* negative test: every sleep sees a wake
+                                               already pending, so it is aborted */
 
 /* test ids (boot argument bits 15:0, dbgrun <id>) */
 #define DBG_T_STRESS        1u

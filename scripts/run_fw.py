@@ -42,6 +42,10 @@ recording what each run produced.
                                   with a valid dump
              dbg/triage           triage groups every injected failure by its
                                   dump signature; a replay reproduces it
+             dbg-neg/stress-abort negative test: every sleep of the stress test
+                                  is aborted (wake already pending): must FAIL
+             dbg-neg/drv-abort    negative test: the driver test's SLEEP and IDLE
+                                  are aborted: must FAIL
 """
 import argparse
 import json
@@ -250,7 +254,8 @@ def m_dbg(a):
     jobs = [("drv", 2, 0, 0, 0)] + [(f"stress-s{s}", 1, s, a.dbg_iters, 0) for s in seeds] + \
            [("stress-repro", 1, seeds[0], a.dbg_iters, 0), ("crash-illegal", 3, 0, 0, 0),
             ("crash-misalign", 4, 0, 0, 0), ("hang", 5, 0, 0, 0), ("divtest", 6, 0, 0, 0)] + \
-           [(f"inject-s{s}", 1, s, a.dbg_iters, 1) for s in inject]
+           [(f"inject-s{s}", 1, s, a.dbg_iters, 1) for s in inject] + \
+           [("neg-stress-abort", 1, seeds[0], a.dbg_iters, 4), ("neg-drv-abort", 2, 0, 0, 4)]
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         runs = {r["name"]: r for r in ex.map(lambda j: sim(*j), jobs)}
     res = []
@@ -337,6 +342,20 @@ def m_dbg(a):
         except (OSError, subprocess.TimeoutExpired) as e:
             det = f"Spike did not run: {e}"
     rec("divtest", ok, det)
+
+    # negative tests (DBG_F_NEG_ABORT = 4): an aborted transition must fail the run
+    r = runs["neg-stress-abort"]
+    det = "STRESS CHECK FAILED: sleep transition ABORTED" in r["out"]
+    res_ok = r["rc"] != 0 and "[tb] TEST FAILED" in r["out"] and det and "STRESS PASS" not in r["out"]
+    print(f"  {'PASS' if res_ok else 'FAIL'} dbg-neg/stress-abort  "
+          f"{'aborted sleep reported as a failure' if res_ok else 'NOT DETECTED: run did not fail on the aborted sleep'}")
+    res.append({"id": "dbg-neg/stress-abort", "status": "PASS" if res_ok else "FAIL"})
+    r = runs["neg-drv-abort"]
+    det = re.search(r"\[DBGT\] SLEEP completed and resumed \(not ABORTED\)\s+FAIL", r["out"]) is not None
+    res_ok = r["rc"] != 0 and "[tb] TEST FAILED" in r["out"] and det and "DBGTEST RESULT: FAIL" in r["out"]
+    print(f"  {'PASS' if res_ok else 'FAIL'} dbg-neg/drv-abort     "
+          f"{'aborted SLEEP reported as a failure' if res_ok else 'NOT DETECTED: driver test accepted the aborted SLEEP'}")
+    res.append({"id": "dbg-neg/drv-abort", "status": "PASS" if res_ok else "FAIL"})
 
     # fault injection: each run must end in a crash dump (it is a failing run
     # by design); triage groups them by signature and must reproduce one

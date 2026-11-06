@@ -31,6 +31,7 @@
 static int      sim_mode;              /* host autorun: exit with the verdict */
 static uint32_t rng;
 static int      quiet;
+static int      neg_abort;             /* DBG_F_NEG_ABORT: provoke aborted transitions */
 
 static uint32_t rnd(void)            { return rand_next(&rng); }
 static uint32_t rnd_n(uint32_t n)    { return rnd() % n; }
@@ -145,20 +146,38 @@ static int op_irq(uint32_t arg)
     return 0;
 }
 
+/* A sleep counts (and is recorded as coverage) only if the requested
+ * transition completed: PM_WOKE for IDLE (IDLE_CNT advanced), PM_RESUMED for
+ * SLEEP / DEEP_SLEEP (powered off and resumed). PM_ABORTED, PM_EWB or any
+ * other result is a failure (doc/SPEC.md: an aborted transition is never a
+ * pass or coverage). */
 static int op_sleep(uint32_t arg)
 {
     static const enum pm_state sts[3] = {PM_IDLE, PM_SLEEP, PM_DEEP_SLEEP};
     uint32_t si = arg % 3u;
     uint32_t ticks = 6000u + (arg >> 8) % 6000u;
     if (!(platform_caps() & CAP_PMU)) return 0;
-    cov_ps_op[si][pmu_cur_op() % 3u]++;
+    uint32_t op = pmu_cur_op() % 3u;
+    uint32_t sleeps0 = pmu_sleep_count(), idles0 = pmu_idle_count();
     uart_flush();
     /* wake source: the machine timer (MTIE is enabled in mie; pm_suspend
      * writes WAKE_MASK from mie) */
-    timer_set_cmp(timer_now() + ticks);
+    /* negative test: the timer is already expired at the WFI; interrupts are
+     * masked globally so the handler does not consume it first (WFI still
+     * ends on it: it is pending and enabled in mie) */
+    uint32_t irqs = neg_abort ? arch_irq_save() : 0;
+    timer_set_cmp(neg_abort ? timer_now() : timer_now() + ticks);
     int r = pm_suspend(sts[si], 0);
     timer_cancel();
-    if (r < 0) return fail("pm_suspend result", (uint32_t)r, 0);
+    if (neg_abort) arch_irq_restore(irqs);
+    int want = (si == 0) ? PM_WOKE : PM_RESUMED;
+    if (r != want) return fail(r == PM_ABORTED ? "sleep transition ABORTED" : "pm_suspend result", (uint32_t)r,
+                               (uint32_t)want);
+    /* the PMU's own counters confirm the transition */
+    if (si == 0 && pmu_idle_count() != idles0 + 1u) return fail("IDLE_CNT after IDLE", pmu_idle_count(), idles0 + 1u);
+    if (si != 0 && pmu_sleep_count() != sleeps0 + 1u)
+        return fail("SLEEP_CNT after power-down", pmu_sleep_count(), sleeps0 + 1u);
+    cov_ps_op[si][op]++;
     uint32_t c = crc32(buf, sizeof(buf));
     if (c != golden) return fail("RAM CRC after wake", c, golden);
     if (!quiet) printf_("  woke result=%d\n", r);
@@ -478,28 +497,33 @@ static int drv_test(void)
         uint32_t pl0 = dbg_errlog_get(ERR_PWR_LAST);
         uart_flush();
         uint32_t mie = arch_irq_mask_save(1u << IRQ_MTI);
-        timer_set_cmp(timer_now() + 8000u);
+        uint32_t sc0 = pmu_sleep_count();
+        uint32_t irqs2 = arch_irq_save();     /* the wake interrupt is taken after the checks */
+        timer_set_cmp(neg_abort ? timer_now() : timer_now() + 8000u);
         int r = pm_suspend(PM_SLEEP, 0);
         timer_cancel();
+        arch_irq_restore(irqs2);
         arch_irq_mask_restore(mie);
         dbg_trace_get(0, &e);
-        t_check(r == PM_RESUMED || r == PM_ABORTED, "sleep / resume");
+        /* the SLEEP must have completed: an aborted entry is a failure, and
+         * the checks below are never skipped */
+        t_check(r == PM_RESUMED && pmu_sleep_count() == sc0 + 1u, "SLEEP completed and resumed (not ABORTED)");
         t_check(dbg_trace_total() == t0 && e.pc == pc0, "trace intact across SLEEP (PD_CPU off)");
         dbg_evcnt_read(&b);
-        t_check(r != PM_RESUMED || (b.wake == a.wake + 1u && b.t_state[2] > a.t_state[2] &&
-                                    b.trans == a.trans + 2u),
+        t_check(b.wake == a.wake + 1u && b.t_state[2] > a.t_state[2] && b.trans == a.trans + 2u,
                 "counters: one wake, two transitions, time in SLEEP (B16)");
         uint32_t pl = dbg_errlog_get(ERR_PWR_LAST);
-        t_check(r != PM_RESUMED || (ERR_PWR_COUNT(pl) == ERR_PWR_COUNT(pl0) + 2u &&
-                                    ERR_PWR_FROM(pl) == DBG_PS_SLEEP && ERR_PWR_TO(pl) == DBG_PS_RUN &&
-                                    ERR_PWR_RESULT(pl) == ERR_RES_OK),
+        t_check(ERR_PWR_COUNT(pl) == ERR_PWR_COUNT(pl0) + 2u && ERR_PWR_FROM(pl) == DBG_PS_SLEEP &&
+                ERR_PWR_TO(pl) == DBG_PS_RUN && ERR_PWR_RESULT(pl) == ERR_RES_OK,
                 "error log: SLEEP -> RUN completed, two transition events (B16)");
         /* IDLE and a DVFS change */
         dbg_evcnt_read(&a);
         mie = arch_irq_mask_save(1u << IRQ_MTI);
-        timer_set_cmp(timer_now() + 3000u);
+        irqs2 = arch_irq_save();
+        timer_set_cmp(neg_abort ? timer_now() : timer_now() + 3000u);
         r = pm_idle();
         timer_cancel();
+        arch_irq_restore(irqs2);
         arch_irq_mask_restore(mie);
         dbg_evcnt_read(&b);
         t_check(r == PM_WOKE && b.t_state[1] > a.t_state[1] && b.trans == a.trans + 2u && b.wake == a.wake,
@@ -534,25 +558,7 @@ static int div_test(void)
 }
 
 /* ================= run control ================= */
-static void crash_after(int is_exc)
-{
-    uint32_t test = DBG_MBOX->test_id;
-    dbg_errlog_t e;
-    (void)is_exc;
-    dbg_errlog_read(&e);
-    /* expected crashes of the demonstration tests are a PASS */
-    if ((test == DBG_T_CRASH_ILLEGAL && (e.status & ERR_ST_EXC) && e.exc_cause == EXC_ILLEGAL) ||
-        (test == DBG_T_CRASH_MISALIGN && (e.status & ERR_ST_EXC) && e.exc_cause == EXC_LOAD_MISALIGNED)) {
-        printf_("DBGTEST expected crash (cause 0x%x): PASS\n", (unsigned)e.exc_cause);
-        DBG_MBOX->state = DBG_ST_PASS;
-        finish(0);
-    } else {
-        DBG_MBOX->state = DBG_ST_FAIL;
-        finish(0xDB6C0000u | (e.exc_cause & 0xFFu));
-    }
-    puts_("DBGRUN RESULT: FAIL\n");
-    monitor_run(0, 0);
-}
+static void crash_after(int is_exc);
 
 static int run_test(uint32_t test, uint32_t seed, uint32_t iters, uint32_t flags)
 {
@@ -561,6 +567,8 @@ static int run_test(uint32_t test, uint32_t seed, uint32_t iters, uint32_t flags
     mb->flags = flags; mb->iters = iters; mb->state = DBG_ST_RUNNING;
     dbg_crash_seed = seed;
     quiet = (flags & DBG_F_QUIET) != 0;
+    neg_abort = (flags & DBG_F_NEG_ABORT) != 0;
+    if (neg_abort) puts_("DBGRUN NEGATIVE TEST: every sleep sees a pending wake (aborted)\n");
     printf_("DBGRUN test=%u seed=0x%08x\n", (unsigned)test, (unsigned)seed);
     dbg_errlog_clear(ERR_ST_ALL);
     dbg_setup_capture();
@@ -607,6 +615,29 @@ static const mon_cmd_t dbg_cmds[] = {
     {"dbgrun", "<t> <seed> [it] [fl]",   "1 stress 2 drv 3 ill 4 mis 5 hang 6 div", cmd_dbgrun},
     {"exit",   "[code]",                 "end the run (PASS / FAIL)",  cmd_exit},
 };
+
+static void crash_after(int is_exc)
+{
+    uint32_t test = DBG_MBOX->test_id;
+    dbg_errlog_t e;
+    (void)is_exc;
+    dbg_errlog_read(&e);
+    /* expected crashes of the demonstration tests are a PASS */
+    if ((test == DBG_T_CRASH_ILLEGAL && (e.status & ERR_ST_EXC) && e.exc_cause == EXC_ILLEGAL) ||
+        (test == DBG_T_CRASH_MISALIGN && (e.status & ERR_ST_EXC) && e.exc_cause == EXC_LOAD_MISALIGNED)) {
+        printf_("DBGTEST expected crash (cause 0x%x): PASS\n", (unsigned)e.exc_cause);
+        DBG_MBOX->state = DBG_ST_PASS;
+        finish(0);
+        puts_("DBGRUN RESULT: PASS\n");
+    } else {
+        DBG_MBOX->state = DBG_ST_FAIL;
+        finish(0xDB6C0000u | (e.exc_cause & 0xFFu));
+        puts_("DBGRUN RESULT: FAIL\n");
+    }
+    /* the crashed context cannot be resumed: back to the monitor (the trap
+     * handler's stack frame is abandoned) */
+    monitor_run(dbg_cmds, ARRAY_SIZE(dbg_cmds));
+}
 
 int main(void)
 {

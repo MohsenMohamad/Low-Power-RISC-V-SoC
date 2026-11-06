@@ -12,7 +12,9 @@ Covered here: check_results.py, check_soc_cov.py, cov_report.py (CPU coverage
 holes / missing data / waivers), mutation.py (survivor, build failure, mutant
 not applied, waiver without reason), run_cosim.py, run_archtest.py and
 run_cachetest.py result parsing, the PMU unit testbench (PMU mutant) and the
-PMU formal proof (PMU mutant). The SoC testbench checkers have their own
+PMU formal proof (PMU mutant), the lab bench checks (tools/bench, against a
+fake monitor target) and the crash-dump decoder's trace comparator and CRC
+check (tools/dbg_decode.py). The SoC testbench checkers have their own
 negative tests (scripts/soc_neg.py, make sim-neg); the Spike co-simulation
 comparator and the cache scoreboards are exercised by the mutation run.
 """
@@ -298,6 +300,145 @@ def t_pmu(d, verilator):
                     cwd=f"{t}/formal")
 
 
+# ---------------------------------------------------------------------------
+# Bench (tools/bench) and dump decoder (tools/dbg_decode.py), stage 3: a fake
+# monitor target answers the real protocol (fw/app/monitor.c) from a register
+# table, so each bench check can be fed exactly one wrong answer.
+class FakeTarget:
+    """Byte port speaking the monitor protocol: echo, response, "mon> "."""
+
+    def __init__(self, regs, sleep_reply=None, peek_shift=0, on_sleep=None):
+        self.regs = dict(regs)
+        self.sleep_reply = sleep_reply
+        self.peek_shift = peek_shift          # report values for addr + shift (wrong address)
+        self.on_sleep = on_sleep
+        self.out = b""
+        self.line = b""
+
+    def write(self, data):
+        for ch in data:
+            c = bytes([ch])
+            if c in (b"\r", b"\n"):
+                self.out += self.line + b"\r\n" + self.respond(self.line.decode()) + b"mon> "
+                self.line = b""
+            else:
+                self.line += c
+
+    def respond(self, line):
+        p = line.split()
+        if not p:
+            return b""
+        if p[0] == "peek":
+            a, n = int(p[1], 0), int(p[2], 0) if len(p) > 2 else 1
+            return b"".join(b"0x%08x: 0x%08x\r\n" % (a + 4 * i + self.peek_shift,
+                                                     self.regs.get(a + 4 * i, 0)) for i in range(n))
+        if p[0] == "poke":
+            self.regs[int(p[1], 0)] = int(p[2], 0)
+            return b"OK\r\n"
+        if p[0] == "sleep":
+            if self.on_sleep:
+                self.on_sleep(self.regs, p[1])
+            return self.sleep_reply.encode()
+        return b"ERR unknown command '%s'\r\n" % p[0].encode()
+
+    @property
+    def in_waiting(self):
+        return len(self.out)
+
+    def read(self, n=1):
+        d, self.out = self.out[:n], self.out[n:]
+        return d
+
+
+def t_bench(d):
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    sys.path.insert(0, os.path.join(ROOT, "tools", "bench"))
+    import importlib
+    sm = importlib.import_module("soc_map")
+    ma = importlib.import_module("monitor_adapter")
+    seq = importlib.import_module("sequencer")
+    P, D = sm.PMU_BASE, sm.DBG_BASE
+
+    class Prof:
+        cmd_timeout = boot_timeout = 2
+
+    def bench(port):
+        b = seq.Bench.__new__(seq.Bench)
+        b.prof, b.out, b.step_lines, b.dbg = Prof(), d, [], sm.DBG_BASE
+        b.mon = ma.Monitor(port)
+        return b
+
+    good = {D + o: v for o, v in sm.DBG_IDS.items()}
+    good.update({P + sm.PMU["ctrl"]: 0x100, P + sm.PMU["status"]: 0x200, P + sm.PMU["vsel"]: 2,
+                 D + sm.EVC["pstate"]: 0x20})
+
+    # identity: a correct target passes; a target answering 0 for the PMU fails
+    ok, det = seq.act_check_ids(bench(FakeTarget(good)), {})
+    record("bench/ids-positive-control", ok, det)
+    zero = dict(good)
+    for k in ("ctrl", "status", "vsel"):
+        zero[P + sm.PMU[k]] = 0
+    zero[D + sm.EVC["pstate"]] = 0
+    ok, det = seq.act_check_ids(bench(FakeTarget(zero)), {})
+    record("bench/pmu-id-zero", not ok and "LP_EN" in det, det)
+
+    # peek: a value reported for another address is an error
+    try:
+        ma.Monitor(FakeTarget({0x10001000: 0x1234}, peek_shift=4)).peek(0x10001000)
+        record("bench/peek-wrong-address", False, "(peek accepted the value of 0x10001004)")
+    except ma.MonitorError as e:
+        record("bench/peek-wrong-address", "reported for 0x10001004" in str(e), str(e))
+
+    # force power: consistent counters pass; an aborted transition fails, and
+    # so does a "completed" one whose counters / timing did not move
+    def advance(regs, state):
+        regs[P + sm.PMU["sleep_cnt"]] = regs.get(P + sm.PMU["sleep_cnt"], 0) + 1
+        regs[D + sm.EVC["trans"]] = regs.get(D + sm.EVC["trans"], 0) + 2
+        regs[D + sm.EVC["wake"]] = regs.get(D + sm.EVC["wake"], 0) + 1
+        regs[D + sm.EVC["t_sleep_lo"]] = regs.get(D + sm.EVC["t_sleep_lo"], 0) + 15000
+        n = (regs.get(D + sm.ERR["pwr_last"], 0) >> 16) + 2
+        regs[D + sm.ERR["pwr_last"]] = (n << 16) | (sm.RES_OK << 4) | (sm.PS["run"] << 2) | sm.PS["sleep"]
+    woke_ok = "woke: result 1, rst_cause 2, wake_cause 2, sleep_cnt +1\r\n"
+    woke_abort = "woke: result 2, rst_cause 1, wake_cause 2, sleep_cnt +0\r\n"
+    step = {"state": "sleep", "ticks": 20000}
+    ok, det = seq.act_power(bench(FakeTarget(good, woke_ok, on_sleep=advance)), step)
+    record("bench/power-positive-control", ok, det)
+    # aborted, without the firmware's ERR line (an older firmware) and with it
+    ok1, det1 = seq.act_power(bench(FakeTarget(good, woke_abort)), step)
+    ok2, det2 = seq.act_power(bench(FakeTarget(good, woke_abort + "ERR transition ABORTED\r\n")), step)
+    record("bench/power-aborted", not ok1 and not ok2 and "ABORTED" in det1 and "ABORTED" in det2, det1)
+    # "completed" but nothing moved: the counter and timing checks are not skipped
+    ok, det = seq.act_power(bench(FakeTarget(good, woke_ok)), step)
+    record("bench/power-counters-not-skipped", not ok and "sleep_cnt" in det and "time in sleep" in det, det)
+
+
+def t_dbg_decode(d):
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import importlib
+    dec = importlib.import_module("dbg_decode")
+    nop, add = 0x00000013, 0x00b50533
+    spike = [(0x10000000 + 4 * i, add if i % 3 == 0 else nop) for i in range(40)]
+    trace = [{"pc": 0x10000000 + 4 * i, "data": add if i % 3 == 0 else nop, "info": 0, "idx": i - 5}
+             for i in range(5, 30)]
+    r = dec.divergence(trace, spike)
+    record("dbg_decode/divergence-positive-control", r["status"] == "match" and r["matched"] == 25, r["detail"])
+    bad = [dict(trace[0], pc=0x10000400)] + trace[1:]          # wrong first retirement
+    r = dec.divergence(bad, spike)
+    record("dbg_decode/bad-first-retirement", r["status"] == "diverged" and r["trace_index"] == 0, r["detail"])
+    bad = [dict(trace[0], data=0xdeadbeef)] + trace[1:]        # wrong first instruction word
+    r = dec.divergence(bad, spike)
+    record("dbg_decode/bad-first-instruction", r["status"] == "diverged" and r["trace_index"] == 0, r["detail"])
+    # a dump with a corrupted CRC is flagged
+    body = "### DBG-CRASH BEGIN v1\nREASON exception\nCSR mcause=0x2\nERRLOG status=0x1\nCOUNTERS ic_hit=0x1\n" \
+           "TRACE status=0x0 count=0 wptr=0 depth=64 total=0x0\n"
+    import binascii
+    crc = binascii.crc32(body.encode()) & 0xFFFFFFFF
+    ok = dec.parse_dumps(body + "### DBG-CRASH END crc=0x%08x\n" % crc)[0]["crc_ok"]
+    bad = dec.parse_dumps(body.replace("0x2", "0x3") + "### DBG-CRASH END crc=0x%08x\n" % crc)[0]["crc_ok"]
+    record("dbg_decode/bad-crc", ok and not bad, "good dump accepted, corrupted dump flagged" if ok and not bad else
+           "CRC check did not tell good from bad")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=os.path.join(ROOT, "build/selftest"))
@@ -309,7 +450,7 @@ def main():
     os.makedirs(d)
     groups = [("check_results", lambda: t_check_results(d)), ("check_soc_cov", lambda: t_check_soc_cov(d)),
               ("cov_report", lambda: t_cov_report(d, os.path.abspath(a.build))), ("runners", lambda: t_runners(d)),
-              ("fw", lambda: t_fw(d)),
+              ("fw", lambda: t_fw(d)), ("bench", lambda: t_bench(d)), ("dbg_decode", lambda: t_dbg_decode(d)),
               ("pmu", lambda: t_pmu(d, a.verilator)), ("mutation", lambda: t_mutation(d, a.verilator))]
     for name, fn in groups:
         try:

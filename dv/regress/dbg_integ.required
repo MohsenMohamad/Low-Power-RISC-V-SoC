@@ -13,3 +13,6 @@ dbg/inject-s4
 dbg/inject-s6
 dbg/inject-s20
 dbg/triage
+# negative tests: an aborted transition must fail the stress test and the driver test
+dbg-neg/stress-abort
+dbg-neg/drv-abort

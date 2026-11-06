@@ -210,42 +210,40 @@ def parse_spike(text):
 
 def divergence(trace, spike):
     """Align the retired-instruction trace with the Spike sequence and report
-    the first entry that differs. Returns dict."""
+    the first entry that differs. Returns dict.
+
+    The trace may start in the middle of a loop, so its first retired PC can
+    occur several times in the Spike log; every occurrence is a candidate
+    start and the longest PC match wins. Every trace entry is compared from
+    the first one on: the alignment never skips leading entries, so a wrong
+    first retirement is reported as a divergence (an earlier version tried
+    the first 8 entries as start points and reported "no divergence" after
+    skipping a bad first entry)."""
     dut = [(x["pc"], x["data"], x["idx"]) for x in trace if x["info"] & 3 == 0]
     if not dut:
         return {"status": "empty", "detail": "trace holds no retired instructions"}
-    best = (-1, None)
-    # Align on the PC sequence only (an instruction-word mismatch must not
-    # move the alignment): candidates are Spike positions whose PC equals one
-    # of the first trace PCs (the trace may start in the middle of a loop).
-    for k0 in range(min(8, len(dut))):
-        for s in (i for i, (pc, _) in enumerate(spike) if pc == dut[k0][0]):
-            n = 0
-            while k0 + n < len(dut) and s + n < len(spike) and spike[s + n][0] == dut[k0 + n][0]:
-                n += 1
-            if n > best[0]:
-                best = (n, (k0, s))
-        if best[0] >= len(dut) - k0:
-            break
-    if best[1] is not None:
-        # first difference in PC or instruction word inside the aligned window
-        n_pc, (k0, s) = best
+    starts = [i for i, (pc, _) in enumerate(spike) if pc == dut[0][0]]
+    if not starts:
+        d_pc, d_insn, idx = dut[0]
+        return {"status": "diverged", "matched": 0, "trace_index": idx, "dut_pc": d_pc, "dut_insn": d_insn,
+                "spike_pc": None, "spike_insn": None,
+                "detail": "first divergence at trace entry %d (the first retired instruction): DUT pc 0x%08x "
+                          "0x%08x %s does not occur in the Spike log" % (idx, d_pc, d_insn, disasm(d_insn, d_pc))}
+    best_n, best_s = -1, None
+    for st in starts:
         n = 0
-        while n < n_pc and spike[s + n][1] == dut[k0 + n][1]:
+        while n < len(dut) and st + n < len(spike) and spike[st + n] == (dut[n][0], dut[n][1]):
             n += 1
-        best = (n, (k0, s))
-    if best[1] is None:
-        return {"status": "no-alignment", "detail": "trace PCs do not occur in the Spike log"}
-    n, (k0, s) = best
-    if k0 + n >= len(dut):
-        return {"status": "match", "matched": n, "skipped": k0,
-                "detail": "no divergence: %d retired instructions match Spike (from trace entry %d)" % (n, dut[k0][2])}
-    i = k0 + n
-    d_pc, d_insn, idx = dut[i]
-    if s + n < len(spike):
-        s_pc, s_insn = spike[s + n]
-    else:
-        s_pc, s_insn = None, None
+        if n > best_n:
+            best_n, best_s = n, st
+        if n == len(dut):
+            break
+    n, st = best_n, best_s
+    if n == len(dut):
+        return {"status": "match", "matched": n, "skipped": 0,
+                "detail": "no divergence: %d retired instructions match Spike (from trace entry %d)" % (n, dut[0][2])}
+    d_pc, d_insn, idx = dut[n]
+    s_pc, s_insn = spike[st + n] if st + n < len(spike) else (None, None)
     res = {"status": "diverged", "matched": n, "trace_index": idx, "dut_pc": d_pc, "dut_insn": d_insn,
            "spike_pc": s_pc, "spike_insn": s_insn}
     if s_pc is None:

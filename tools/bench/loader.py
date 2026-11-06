@@ -1,11 +1,14 @@
 """Firmware loading through the monitor, with checksum verification.
 
-The image (tools/mkimage.py format: 32-byte header "LPAP", load address,
-size, entry, CRC-32 of the bytes after the header) is checked on the host,
-written with 'poke', read back with 'peek <addr> <n>' and its CRC-32
-compared with the host CRC. The boot ROM checks the header CRC again when
-it boots the image after 'reset'.
+The image (tools/mkimage.py format, doc/BOOT_ABI.md: 32-byte header "LPAP",
+load address, size, entry, CRC-32 of the bytes after the header) is checked
+on the host, written with 'poke' through the RAM's uncached alias (so the
+monitor's poke does not clean the D-cache for every word and no stale cached
+copy can exist), read back with 'peek <addr> <n>' through the alias and its
+CRC-32 compared with the host CRC. The boot ROM checks the header CRC again
+when it boots the image after the watchdog reboot (Monitor.reboot).
 """
+import soc_map as sm
 import binascii
 import struct
 
@@ -34,7 +37,10 @@ def read_image(path):
 def load(mon, path, chunk=64, progress=None):
     """Write the image with poke and verify it by read-back. Returns the image dict."""
     img = read_image(path)
-    data, base = img["data"], img["load"]
+    data = img["data"]
+    if not sm.RAM_BASE <= img["load"] < sm.RAM_BASE + sm.RAM_SIZE or img["load"] + len(data) > sm.RAM_BASE + sm.RAM_SIZE:
+        raise LoadError("image load address 0x%08x / size %d outside the RAM" % (img["load"], len(data)))
+    base = sm.RAM_ALIAS + (img["load"] - sm.RAM_BASE)
     words = struct.unpack("<%dI" % (len(data) // 4), data)
     for i, w in enumerate(words):
         mon.poke(base + 4 * i, w)
@@ -46,6 +52,8 @@ def load(mon, path, chunk=64, progress=None):
         n = min(chunk, len(words) - i)
         v = mon.peek(base + 4 * i, n)
         back += v if isinstance(v, list) else [v]
+    if len(back) != len(words):
+        raise LoadError("read back %d words, expected %d" % (len(back), len(words)))
     rb = struct.pack("<%dI" % len(back), *back)
     host_crc = binascii.crc32(data) & 0xFFFFFFFF
     tgt_crc = binascii.crc32(rb) & 0xFFFFFFFF
