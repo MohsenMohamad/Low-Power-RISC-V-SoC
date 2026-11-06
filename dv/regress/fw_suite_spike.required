@@ -29,6 +29,7 @@ na fw/33  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM /
 na fw/34  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/35  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/36  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
+na fw/37  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/41  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/42  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)
 na fw/43  # needs SoC peripherals (intc / uart / pmu / cache / dvfs / boot ROM / wake timer)

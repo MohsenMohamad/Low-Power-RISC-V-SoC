@@ -21,7 +21,7 @@ mode in DEEP_SLEEP). Uncached alias: `RAM_BASE + 0x2000_0000` = `0x3000_0000`.
 |---|---|---|---|---|
 | `0x000` | 64 B | handoff block (below) | ROM, application | at power-on |
 | `0x040` | 104 B | saved CPU context `pm_ctx_t` (`CTX_ADDR` = `0x1000_0040`) | application (`pm_suspend`) | magic word at every boot |
-| `0x100` | 8 B | host mailbox: `HARG` magic, boot argument | host / testbench | never |
+| `0x100` | 20 B | host mailbox: `HARG` magic, boot argument, three application arguments | host / testbench | never |
 | `0x200` | 512 B | persistent area: kept across a resume, a resume-rejected cold boot and a watchdog reset; accessed only through the uncached alias | application | at power-on |
 | `0x400` | 3 KB | boot ROM `.data`, `.bss` and stack (stack top `RAM_BASE + 0x1000`) | ROM | - |
 | `0x1000` | up to 124 KB | application image (header first; never written at run time), then the run-time copy of its `.data`, its `.bss`; application stack at the top of RAM | host (image), application | - |
@@ -154,7 +154,10 @@ The host (in simulation the testbench, `+bootarg=<hex>`) may write
 argument before the CPU starts. The application reads it through the uncached
 alias. Boot argument: bit 31 run non-interactively, bit 30 start the monitor,
 bits 15:0 test ID (`0xFFFF` = all). Without a valid mailbox the validation
-application starts the UART monitor.
+application starts the UART monitor. `RAM_BASE + 0x108`, `0x10C`, `0x110`
+hold three application arguments (testbench `+hostarg0=` .. `+hostarg2=`,
+0 when not given); the debug application uses them as seed, iteration count
+and flags (doc/DEBUG_SPEC.md section 9).
 
 End of a run: the application prints a last UART line `PASS` (exit code 0)
 or `FAIL 0x<code>`, stores the code in `handoff.signature` and stops in WFI

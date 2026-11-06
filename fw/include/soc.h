@@ -123,6 +123,133 @@
 #define WT_CTRL_PERIODIC    (_U(1) << 1)
 #define WT_ST_EXPIRED       (_U(1) << 0)
 
+/* ------------------------------------------------------------ debug blocks
+ * doc/DEBUG_SPEC.md (normative for these registers): trace buffer, event
+ * counters, error log, watchdog at DBG_BASE + 0x0000 / 0x1000 / 0x2000 /
+ * 0x3000; 0x2000_C000-0x2000_FFFF reserved (SLVERR). */
+#define DBG_TRACE_BASE      (DBG_BASE + _U(0x0000))
+#define DBG_EVCNT_BASE      (DBG_BASE + _U(0x1000))
+#define DBG_ERRLOG_BASE     (DBG_BASE + _U(0x2000))
+#define DBG_WDT_BASE        (DBG_BASE + _U(0x3000))
+#define DBG_ID              0x000
+#define DBG_ID_TRACE        _U(0xDB600101)
+#define DBG_ID_EVCNT        _U(0xDB600201)
+#define DBG_ID_ERRLOG       _U(0xDB600301)
+#define DBG_ID_WDT          _U(0xDB600401)
+/* power-state encoding of the debug blocks (PMU stable state) */
+#define DBG_PS_RUN          0
+#define DBG_PS_IDLE         1
+#define DBG_PS_SLEEP        2
+#define DBG_PS_DSLEEP       3
+/* trace buffer */
+#define TRC_CTRL            0x004
+#define TRC_STATUS          0x008
+#define TRC_TRIG            0x00C
+#define TRC_START_PC        0x010
+#define TRC_STOP_PC         0x014
+#define TRC_PC_MASK         0x018
+#define TRC_WPTR            0x01C
+#define TRC_COUNT           0x020
+#define TRC_DEPTH           0x024
+#define TRC_TOTAL           0x028
+#define TRC_TSTAMP          0x02C
+#define TRC_ENTRY(i)        (0x800 + 16 * (i))
+#define TRC_CTRL_EN         (_U(1) << 0)
+#define TRC_CTRL_CLEAR      (_U(1) << 1)
+#define TRC_CTRL_FREEZE     (_U(1) << 2)
+#define TRC_CTRL_LOG_TRAP   (_U(1) << 3)
+#define TRC_CTRL_LOG_PWR    (_U(1) << 4)
+#define TRC_CTRL_FRZ_EXC    (_U(1) << 5)
+#define TRC_CTRL_FRZ_ERR    (_U(1) << 6)
+#define TRC_ST_ACTIVE       (_U(1) << 0)
+#define TRC_ST_FROZEN       (_U(1) << 1)
+#define TRC_ST_WRAPPED      (_U(1) << 2)
+#define TRC_ST_STOPPED      (_U(1) << 3)
+#define TRC_ST_ARMED        (_U(1) << 4)
+#define TRC_ST_CLR_PEND     (_U(1) << 5)
+#define TRC_TRIG_NONE       0
+#define TRC_TRIG_PC         1
+#define TRC_TRIG_EXC        2
+#define TRC_TRIG_PWR        3
+#define TRC_INFO_TYPE(x)    ((x) & _U(3))
+#define TRC_INFO_PSTATE(x)  (((x) >> 2) & _U(3))
+#define TRC_INFO_CAUSE(x)   ((((x) >> 16) & _U(0xFF)) | ((x) & _U(0x80000000)))
+#define TRC_TYPE_RETIRE     0
+#define TRC_TYPE_TRAP       1
+#define TRC_TYPE_PWR        2
+/* event counters */
+#define EVC_CTRL            0x004
+#define EVC_STATUS          0x008
+#define EVC_IC_HIT          0x010
+#define EVC_IC_MISS         0x014
+#define EVC_DC_HIT          0x018
+#define EVC_DC_MISS         0x01C
+#define EVC_STALL           0x020
+#define EVC_WAKE            0x024
+#define EVC_DVFS            0x028
+#define EVC_TRANS           0x02C
+#define EVC_T_LO(s)         (0x030 + 8 * (s))
+#define EVC_T_HI(s)         (0x034 + 8 * (s))
+#define EVC_PSTATE          0x050
+#define EVC_CTRL_FREEZE     (_U(1) << 0)
+#define EVC_CTRL_CLEAR      (_U(1) << 1)
+#define EVC_CTRL_FRZ_ERR    (_U(1) << 2)
+#define EVC_ST_FROZEN       (_U(1) << 0)
+#define EVC_ST_CLR_PEND     (_U(1) << 1)
+/* error log */
+#define ERR_STATUS          0x004
+#define ERR_CTRL            0x008
+#define ERR_IRQ_EN          0x00C
+#define ERR_FRZ_EN          0x010
+#define ERR_SW_ERR          0x014
+#define ERR_SW_CODE         0x018
+#define ERR_EXC_CAUSE       0x020
+#define ERR_EXC_PC          0x024
+#define ERR_EXC_TVAL        0x028
+#define ERR_EXC_TS          0x02C
+#define ERR_EXC_CNT         0x030
+#define ERR_PWR_LAST        0x040
+#define ERR_PWR_TS          0x044
+#define ERR_PWR_ERR_LAST    0x048
+#define ERR_PWR_ERR_TS      0x04C
+#define ERR_WDT_CNT         0x050
+#define ERR_WDT_TS          0x054
+#define ERR_WDT_PSTATE      0x058
+#define ERR_TSTAMP          0x05C
+#define ERR_ST_EXC          (_U(1) << 0)
+#define ERR_ST_EXC_OVR      (_U(1) << 1)
+#define ERR_ST_PWR_ERR      (_U(1) << 2)
+#define ERR_ST_WDT_BITE     (_U(1) << 3)
+#define ERR_ST_WDT_RST      (_U(1) << 4)
+#define ERR_ST_SW_ERR       (_U(1) << 5)
+#define ERR_ST_ALL          _U(0x3F)
+#define ERR_PWR_FROM(v)     ((v) & _U(3))
+#define ERR_PWR_TO(v)       (((v) >> 2) & _U(3))
+#define ERR_PWR_RESULT(v)   (((v) >> 4) & _U(3))
+#define ERR_PWR_COUNT(v)    ((v) >> 16)
+#define ERR_RES_OK          0
+#define ERR_RES_TIMEOUT     1
+#define ERR_RES_ABORTED     2
+#define ERR_RES_REFUSED     3
+/* watchdog */
+#define WDT_CTRL            0x004
+#define WDT_LOAD            0x008
+#define WDT_BARK            0x00C
+#define WDT_COUNT           0x010
+#define WDT_KICK            0x014
+#define WDT_STATUS          0x018
+#define WDT_RST_CNT         0x01C
+#define WDT_CTRL_EN         (_U(1) << 0)
+#define WDT_CTRL_BARK_EN    (_U(1) << 1)
+#define WDT_CTRL_RST_EN     (_U(1) << 2)
+#define WDT_CTRL_PAUSE_LP   (_U(1) << 3)
+#define WDT_CTRL_LOCK       (_U(1) << 31)
+#define WDT_KICK_KEY        _U(0x5A5AA5A5)
+#define WDT_ST_BARK         (_U(1) << 0)
+#define WDT_ST_BITE         (_U(1) << 1)
+#define WDT_ST_RST_PEND     (_U(1) << 2)
+#define WDT_ST_BAD_KICK     (_U(1) << 3)
+
 /* ------------------------------------------------------------ CPU (doc/CPU.md) */
 #define CSR_MCACHECTL       0x7C0
 #define MCACHECTL_DFLUSH    (_U(1) << 0)    /* D-cache clean + invalidate */

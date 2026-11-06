@@ -30,7 +30,7 @@
 // * A requested power-down that the PMU refused (dirty D-cache) or that was
 //   aborted before the clock gate is reported as ABORTED; it is never counted
 //   as a completed transition, as coverage, or in the latency statistics.
-// Plusargs: +rom=<hex> +ram=<hex> +bootarg=<hex> +cov=<file> +vcd +timeout=<ns>
+// Plusargs: +rom=<hex> +ram=<hex> +bootarg=<hex> +hostarg0..2=<hex> +cov=<file> +vcd +timeout=<ns>
 //           +uart_in=<file> +uart_log=<file> +wake_delay=<n>
 //           +break_iso (negative test: defeat isolation)
 //           +neg_short_rst (negative test: too short PD_CPU reset pulse)
@@ -122,9 +122,17 @@ module tb_soc #(
       $display("[tb] RAM image: %s", ram);
     end
     if ($value$plusargs("bootarg=%h", barg)) begin
+      logic [31:0] ha0, ha1, ha2;
       dut.u_aon.u_ram.g_ram.u_ram.mem[32'h100 / 4] = 32'h4841_5247;   // "HARG"
       dut.u_aon.u_ram.g_ram.u_ram.mem[32'h104 / 4] = barg;
-      $display("[tb] boot argument 0x%08h", barg);
+      // application arguments (doc/BOOT_ABI.md): +hostarg0..2=<hex>, default 0
+      if (!$value$plusargs("hostarg0=%h", ha0)) ha0 = 0;
+      if (!$value$plusargs("hostarg1=%h", ha1)) ha1 = 0;
+      if (!$value$plusargs("hostarg2=%h", ha2)) ha2 = 0;
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h108 / 4] = ha0;
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h10C / 4] = ha1;
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h110 / 4] = ha2;
+      $display("[tb] boot argument 0x%08h, host arguments 0x%08h 0x%08h 0x%08h", barg, ha0, ha1, ha2);
     end
   end
 

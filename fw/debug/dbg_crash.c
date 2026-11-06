@@ -4,7 +4,7 @@
  * doc/DEBUG_SPEC.md section 10, protected by a CRC-32 over the dump lines.
  */
 #include "dbg_crash.h"
-#include "dbg_drv.h"
+#include "drivers.h"
 #include "arch.h"
 #include "lib.h"
 
@@ -13,8 +13,8 @@ void (*dbg_crash_after)(int is_exception);
 
 static uint32_t crc;
 
-/* Minimal line builder (the Session 3 lib has no vsnprintf): every dump
- * line is assembled in buf, then printed and added to the running CRC. */
+/* Line builder: every dump line is assembled in buf, then printed and added
+ * to the running CRC (doc/DEBUG_SPEC.md section 10). */
 static char     buf[512];
 static unsigned pos;
 

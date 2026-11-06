@@ -71,6 +71,61 @@ int      dcache_flush(void) MUST_CHECK;   /* clean + invalidate             */
 void     icache_invalidate(void);
 int      cache_sync_icache(void) MUST_CHECK;  /* after writing code: clean D, invalidate I */
 
+/* ---------------- cache statistics (drivers/dbg.c) ----------------
+ * doc/SPEC.md: cache statistics come from the debug event counters. */
+typedef struct { uint32_t ic_hit, ic_miss, dc_hit, dc_miss; } cache_stats_t;
+void     cache_stats(cache_stats_t *s);   /* lags the CPU by 2-3 clk_aon cycles */
+
+/* ---------------- debug blocks (drivers/dbg.c, doc/DEBUG_SPEC.md) ---------------- */
+int      dbg_present(void);               /* all four blocks answer with their ID */
+
+typedef struct {
+    uint32_t start_sel, stop_sel;         /* TRC_TRIG_*                   */
+    uint32_t start_pc, stop_pc, pc_mask;
+    uint32_t ctrl_flags;                  /* TRC_CTRL_LOG_* / FRZ_*       */
+} dbg_trace_cfg_t;
+typedef struct { uint32_t pc, data, ts, info; } dbg_trace_entry_t;
+void     dbg_trace_setup(const dbg_trace_cfg_t *cfg);   /* disable, configure, clear, enable */
+void     dbg_trace_enable(int en);
+void     dbg_trace_freeze(void);
+uint32_t dbg_trace_status(void);
+uint32_t dbg_trace_count(void);
+uint32_t dbg_trace_total(void);
+uint32_t dbg_trace_depth(void);
+uint32_t dbg_trace_wptr(void);
+void     dbg_trace_get(uint32_t k, dbg_trace_entry_t *e);   /* k = 0: oldest entry */
+
+typedef struct {
+    uint32_t ic_hit, ic_miss, dc_hit, dc_miss, stall;
+    uint32_t wake, dvfs, trans;
+    uint64_t t_state[4];                  /* RUN, IDLE, SLEEP, DEEP_SLEEP (clk_aon cycles) */
+    uint32_t pstate;                      /* [1:0] power state, [5:4] OP */
+} dbg_evcnt_t;
+int      dbg_evcnt_clear(void) MUST_CHECK;   /* 0, or -1 if the clear did not complete */
+void     dbg_evcnt_ctrl(int freeze, int freeze_on_err);
+void     dbg_evcnt_read(dbg_evcnt_t *c);
+uint32_t dbg_evcnt_get(uint32_t off);     /* one 32-bit counter (EVC_*)   */
+void     dbg_evcnt_settle(void);          /* wait until the clk_cpu counters have reached clk_aon */
+
+typedef struct {
+    uint32_t status, exc_cause, exc_pc, exc_tval, exc_ts, exc_cnt;
+    uint32_t pwr_last, pwr_ts, pwr_err_last, wdt_cnt, wdt_ts, wdt_pstate, sw_code;
+} dbg_errlog_t;
+uint32_t dbg_errlog_status(void);
+void     dbg_errlog_clear(uint32_t mask);
+void     dbg_errlog_sw_error(uint32_t code);
+void     dbg_errlog_read(dbg_errlog_t *e);
+void     dbg_errlog_irq_en(uint32_t mask);
+uint32_t dbg_errlog_get(uint32_t off);
+
+void     dbg_wdt_start(uint32_t timeout, uint32_t bark, uint32_t flags);
+void     dbg_wdt_stop(void);
+void     dbg_wdt_kick(void);
+uint32_t dbg_wdt_status(void);
+void     dbg_wdt_clear_status(uint32_t w1c);
+uint32_t dbg_wdt_count(void);
+uint32_t dbg_wdt_rst_cnt(void);
+
 /* Uncached view of a RAM object (lpsoc: the 0x3000_0000 alias). */
 #if PLATFORM_HAS_SOC
 #define UNCACHED(p) ((__typeof__(&(p)[0]))((uintptr_t)(p) + RAM_UNCACHED_OFFSET))

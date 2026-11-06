@@ -354,28 +354,40 @@ Bite sequence when `COUNT` reaches 0 with `EN=1`:
 
 ## 9. Firmware (`fw/debug/`)
 
-* Built on the Session 3 runtime in `fw/` (crt0, lib, UART/timer/intc/PMU/
-  cache drivers, power management, CPU ports, monitor), which is used
-  unmodified; `fw/debug` adds only:
-  * `include/dbg_regs.h`, `drivers/` – trace, counters, error log, watchdog drivers;
-  * `crash/` – crash handler and fixed-format dump (section 10);
-  * `app/dbg_app.c` – stress test (section 11), driver self test, expected
-    crash / hang tests, divergence kernel, and monitor commands added through
-    the monitor's extension API: `dbg`, `dbgrun <test> <seed> [iters] [flags]`,
-    plus `sleep` / `opp` / `exit` with the same syntax and output as
-    Session 3's application so the bench adapter works with both images;
-  * `lib/rt64.c` – 64-bit division helpers, linked only for clang (no libgcc).
-* Tests (`dbgrun` id / `+test=` in simulation): 1 stress, 2 driver self test,
-  3 illegal instruction (expected crash), 4 misaligned load (expected crash),
-  5 hang (expected watchdog reset + post-mortem dump), 6 divergence kernel.
-* Toolchain: `riscv64-unknown-elf-gcc` if present, else
-  `clang --target=riscv32-unknown-elf` + `ld.lld`; `TOOLCHAIN=gcc|clang`
-  forces one. `-march=rv32im_zicsr_zifencei -mabi=ilp32`, `-Werror`.
-* Run control: the integration testbench provides seed / flags / iterations
-  in its control device (`SIMCTRL_SEED` 0x10, `FLAGS` 0x14, `ITERS` 0x18,
-  `DBG_MAGIC` 0x1C); on a board the bench writes the mailbox at
-  `RAM_BASE + 0x300` (Session 3 persistent area, uncached alias) or uses
-  `dbgrun`. **[MERGE]** align the mailbox address with the RAM map.
+Part of the one firmware tree (`fw/Makefile`, application `dbgapp`, image
+`build/fw/lpsoc/dbgapp.hex`); GCC 13.2, `-march=rv32im_zicsr_zifencei
+-mabi=ilp32`, `-Werror`. Shared with every other application, not copied:
+
+* startup `fw/app/crt0.S`, boot ROM, image format (doc/BOOT_ABI.md);
+* drivers: the debug blocks are `fw/drivers/dbg.c` (API in
+  `fw/include/drivers.h`, registers in `fw/include/soc.h`), next to the UART,
+  timer, intc, PMU and cache drivers; `cache_stats()` (cache statistics,
+  doc/SPEC.md) reads the event counters;
+* power management `fw/pm/pm.c`, platform, monitor, and the monitor commands
+  `sleep` / `opp` / `exit` (`fw/app/app_cmds.c`, one implementation for the
+  validation application and this one);
+* result checking: `scripts/run_fw.py` + `scripts/check_results.py`.
+
+`fw/debug` holds only the application (`dbg_app.c`), the crash handler and
+dump (`dbg_crash.c`, section 10) and the divergence kernel
+(`dbg_div_kernel.S`, plus its Spike harness `spike_divk.S`).
+
+* Tests (boot-argument test id, or `dbgrun <id> <seed> [iters] [flags]`):
+  1 stress (section 11), 2 driver and wiring test (trace triggers and freeze,
+  retire / trap port against memory and mcause / mepc / mtval, exact D-cache
+  hit / miss counts, I-cache events, stall counter, error-log and watchdog
+  interrupts at intc sources 4 / 5, PMU stable state / transition events /
+  time in state / DVFS count, trace intact across SLEEP), 3 illegal
+  instruction (expected crash), 4 misaligned load (expected crash), 5 hang
+  (watchdog reset of PD_CPU through the PMU, post-mortem dump after the
+  reboot), 6 divergence kernel (trace compared with Spike).
+* Run control: the host boot argument (doc/BOOT_ABI.md, bit 31 set) selects
+  the test; host arguments 0..2 are seed, iterations, flags. The application
+  prints `PASS` / `FAIL 0x...` and stops. On a board the bench writes the
+  debug mailbox (`fw/include/dbg_mbox.h`, `RAM_BASE + 0x300` in the
+  persistent area, uncached alias) with state REQUEST, or uses `dbgrun`.
+  The mailbox record of a running test survives the watchdog reset, so the
+  rebooted application knows the hang was expected.
 
 ## 10. Crash dump format (UART, fixed and parseable)
 
@@ -441,42 +453,20 @@ CRC-32 with the host; the boot ROM checks the image header CRC again on
 WFI; each transition is checked in the PMU counters, the debug event
 counters (wake count, time in state, DVFS count) and the error log.
 
-## 13. Regression conventions
+## 13. Regression
 
-`tools/regress.py` discovers suites from `tools/regress_suites.toml`:
+Part of the single top-level `make test` (scripts/regress.py); each step
+checks its results against a required-test list (doc/SPEC.md):
 
-* any directory with a Makefile that has a `list-tests` target is run per test
-  (`make -C dir list-tests` prints names; `make -C dir run-test TEST=<name> SEED=<n>`);
-* otherwise a Makefile with a `test` target is run as one test;
-* cocotb smoke directories (Makefile including `cocotb-config --makefiles`) are
-  run with `make SIM=verilator` and their `results.xml` is parsed;
-* `verif/uvm/` is excluded (commercial simulator);
-* scripts are configured explicitly in `tools/regress_suites.toml` (Session 3's
-  `tools/run_tests.py`, pass pattern `make test: ... -> PASS`);
-* random stress seeds: `make -C verif/debug run-test TEST=integ_stress SEED=<s>`;
-* suites with a `build` target are built once, serially, before their tests
-  run in parallel.
+| Step | Command | Required list | Content |
+|---|---|---|---|
+| debug unit benches | `make dbg-unit` | `dv/regress/dbg_unit.required` | `verif/debug` benches (trace at depths 16 / 32 / 64 / 128, counters, error log, watchdog, wrapper) x `DBG_SEEDS`, and negative tests of the bench checkers (`scripts/run_dbg.py`) |
+| debug on the SoC | `make dbg-integ` | `dv/regress/dbg_integ.required` | the debug application on `sim/tb_soc.sv` (`scripts/run_fw.py dbg`): wiring test, stress seeds, reproducibility, expected crashes, watchdog hang, Spike divergence, fault injection + triage |
+| bench flow | `make bench` | `dv/regress/bench.required` | `tools/bench` against the simulation through the UART pseudo-terminal (section 12) |
 
-A test passes when its command exits 0, its log (and the test's own
-simulator / UART logs) contain no `%Error`, `%Fatal`, `TEST FAILED`,
-`SIM RESULT: FAIL`, `CHECK FAILED` or failed assertion, and the suite's
-pass pattern (if any) is found. `SKIP` (tool missing) is never counted as PASS. Coverage files (`coverage*.dat`,
-`*.info`) found in a test's directory are collected by `tools/cov_merge.py`.
+`tools/dbg_decode.py` judges every crash dump (CRC, reason, mcause /
+mtval, divergence against Spike), `tools/triage.py` groups the
+fault-injection failures by signature and replays one;
+`tools/cov_merge.py` merges the debug bench coverage. They are tools of
+those steps, not runners of their own.
 
-## 14. Integration preview glue (testbench only)
-
-`verif/debug/integ/tb_dbg_soc.sv` connects the debug subsystem to the
-PicoRV32 SoC until the SoC top of Session 2 provides the real ports:
-
-| Debug port | Preview source | Difference from the real port |
-|---|---|---|
-| retire `ret_*` | PicoRV32 `dbg_valid_insn && launch_next_insn`, `dbg_insn_addr`, `dbg_insn_opcode` (the RVFI retire condition) | none |
-| trap `trap_*` | PicoRV32 IRQ entry (`eoi` 0 -> non-zero): bit 1 -> cause 2, bit 2 -> cause 4, bits 3/4/5 -> MTI/MSI/MEI; `tval` 0 | ecall/ebreak/illegal all report cause 2; misaligned/bus error report 4 |
-| cache events, stall | PicoRV32 cache hit/miss strobes, `mem_valid && !mem_ready` | none |
-| `pwr_state_i`, `dvfs_op_i`, `pmu_evt_*` | derived from the PMU FSM state, `cur_op`, `cnt_abort` | results other than OK/aborted are not produced |
-| `cpu_rst_req_o` | applied as a PMU software reset (forced register write) | no effect while the PMU is not in RUN |
-| isolation | all CPU-side inputs forced to 0 while the PMU isolates PD_CPU | none |
-
-Tools: the testbenches need Verilator >= 5.03x with `--timing` and an SMT
-solver (`z3`) for constrained `randomize()`; Ubuntu 24.04's Verilator 5.020
-does not support SVA `##` sequences. CI builds Verilator v5.054.

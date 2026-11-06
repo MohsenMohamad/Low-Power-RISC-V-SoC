@@ -13,6 +13,8 @@
 #   pm_test    SoC power-management integration test (stage 1)
 #   boot_test  boot ROM / resume ABI test (stage 1)
 #   neg_fail   prints a FAIL verdict (negative test of the testbench)
+#   dbgapp     debug application: stress, debug drivers / wiring, crash and
+#              watchdog tests, divergence kernel (fw/debug, doc/DEBUG_SPEC.md)
 # spike outputs: suite.elf
 
 PLATFORM ?= lpsoc
@@ -36,19 +38,20 @@ LDFLAGS  := -nostdlib -nostartfiles -Wl,--gc-sections -Wl,--no-warn-rwx-segments
 
 COMMON   := lib/printf.c lib/string.c lib/crc32.c lib/trap.c \
             drivers/uart.c drivers/timer.c drivers/wtimer.c drivers/intc.c drivers/pmu.c \
-            drivers/cache.c pm/pm.c app/monitor.c \
+            drivers/cache.c drivers/dbg.c pm/pm.c app/monitor.c \
             arch/$(ARCH)/arch.c arch/$(ARCH)/trap_entry.S arch/$(ARCH)/ctx.S arch/$(ARCH)/pm_asm.S \
             platform/$(PLATFORM)/platform.c
 ROM_SRC  := bootrom/start.S bootrom/rom_main.c $(COMMON)
-APP_SRC   = app/crt0.S $(COMMON) $(APP_SRC_$(1))
+APP_SRC   = app/crt0.S app/app_cmds.c $(COMMON) $(APP_SRC_$(1))
 APP_SRC_suite     := app/main.c app/suite.c $(wildcard tests/*.c) tests/regs_asm.S
 APP_SRC_pm_test   := app/pm_test.c
 APP_SRC_boot_test := app/boot_test.c
 APP_SRC_neg_fail  := app/neg_fail.c
+APP_SRC_dbgapp    := debug/dbg_app.c debug/dbg_crash.c debug/dbg_div_kernel.S
 HDRS     := $(wildcard include/*.h arch/$(ARCH)/*.h platform/$(PLATFORM)/*.h) Makefile
 
 ifeq ($(PLATFORM),lpsoc)
-APPS     := suite pm_test boot_test neg_fail
+APPS     := suite pm_test boot_test neg_fail dbgapp
 TARGETS  := $(BUILD)/rom.hex $(APPS:%=$(BUILD)/%.hex)
 else
 APPS     := suite

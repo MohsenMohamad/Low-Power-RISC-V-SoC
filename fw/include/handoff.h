@@ -92,6 +92,7 @@ typedef struct {
 typedef struct {
     uint32_t magic;                 /* HOSTBOX_MAGIC when valid          */
     uint32_t boot_arg;              /* see platform_api.h BOOTARG_*      */
+    uint32_t arg[3];                /* application arguments (0 if unset) */
 } hostbox_t;
 
 /* Application image header (at APP_BASE). */

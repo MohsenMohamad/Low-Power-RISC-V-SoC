@@ -19,6 +19,9 @@
 #   make fw-spike    firmware validation suite on Spike (--priv=M and --priv=MSU)
 #   make fw-monitor  scripted UART monitor sessions on the SoC (application, boot ROM)
 #   make fw-neg      firmware-flow negative tests (failing test, aborted IDLE, bad images)
+#   make dbg-integ   debug application on the SoC: driver / wiring test, seeded stress,
+#                    expected crashes, watchdog hang, Spike divergence, fault injection
+#                    + triage (crash dumps judged by tools/dbg_decode.py)
 #   make cosim       CPU: directed + random programs in lockstep with Spike
 #   make archtest    CPU: riscv-arch-test 3.9.1 (rv32i_m I, M, Zifencei, privilege)
 #   make cachetest   caches / AXI mux: SystemVerilog constrained-random unit benches
@@ -51,6 +54,9 @@ CACHE_N      ?= 8000
 MUT_SEEDS    ?= 24
 PMU_EPISODES ?= 400
 DBG_SEEDS    ?= 1 2 3
+DBG_STRESS_SEEDS ?= 1 2 3 4
+DBG_INJECT_SEEDS ?= 4 6 20
+DBG_ITERS    ?= 24
 
 BUILD := build
 
@@ -78,7 +84,7 @@ CHECK   := $(PYTHON) scripts/check_results.py
 COSIM_BIN := $(BUILD)/cosim/obj/Vcosim
 
 .PHONY: test toolchain lint lint-soc lint-cpu lint-debug fw corrupt sim sim-x boot boot-x sim-neg sim-pmu \
-        fw-suite fw-spike fw-monitor fw-neg \
+        fw-suite fw-spike fw-monitor fw-neg dbg-integ \
         cosim cosim-build archtest cachetest dbg-unit coverage formal mutation selftest clean
 
 test:
@@ -187,6 +193,13 @@ fw-monitor: $(VL_TB) $(FW_STAMP)
 fw-neg: $(VL_TB) $(FW_STAMP)
 	$(FW_RUN) neg --spike $(SPIKE_PREFIX)/bin/spike --out $(BUILD)/fw-neg; rc=$$?; \
 	$(CHECK) --name fw-neg --results $(BUILD)/fw-neg/results.json --required dv/regress/fw_neg.required \
+	  && exit $$rc
+
+dbg-integ: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) dbg --spike $(SPIKE_PREFIX)/bin/spike --rv-prefix $(RV_PREFIX) --jobs $(JOBS) \
+	  --dbg-seeds "$(DBG_STRESS_SEEDS)" --dbg-inject-seeds "$(DBG_INJECT_SEEDS)" --dbg-iters $(DBG_ITERS) \
+	  --out $(BUILD)/dbg-integ; rc=$$?; \
+	$(CHECK) --name dbg-integ --results $(BUILD)/dbg-integ/results.json --required dv/regress/dbg_integ.required \
 	  && exit $$rc
 
 # ------------------------------------------------------------------ PMU unit test
