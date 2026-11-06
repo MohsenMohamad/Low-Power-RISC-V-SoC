@@ -140,10 +140,11 @@ module dbg_trace
     end
   end
 
-  // Only cause[31] and cause[7:0] are recorded; address bits below the
-  // 16-byte entry stride and bit 10 (window above DEPTH=64) select words.
+  // Only cause[31] and cause[7:0] are recorded. The RAM read address uses
+  // reg_raddr[AW+3:4]; the entry-window and word-select bits are decoded from
+  // the registered copy reg_raddr_q in the read mux.
   logic unused_a;
-  assign unused_a = ^{trap_cause_i[30:8], reg_raddr[10], reg_raddr[3:0]};
+  assign unused_a = ^{trap_cause_i[30:8], reg_raddr[10:4], reg_raddr[3:0]};
 
   wire frz_req_a = sw_frz_q || (frz_err_q && freeze_i);
 
@@ -323,7 +324,9 @@ module dbg_trace
     reg_rdata = '0;
     reg_rerr  = 1'b0;
     if (reg_raddr_q[11]) begin
-      if (reg_raddr_q[10:4] < 7'(DEPTH)) begin
+      // entry index 0..127 compared on 8 bits: 7'(DEPTH) truncates 128 to 0,
+      // which made every entry of a DEPTH = 128 buffer read as 0
+      if ({1'b0, reg_raddr_q[10:4]} < 8'(DEPTH)) begin
         unique case (reg_raddr_q[3:2])
           2'd0: reg_rdata = ram_rd.pc;
           2'd1: reg_rdata = ram_rd.data;

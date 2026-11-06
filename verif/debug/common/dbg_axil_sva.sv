@@ -39,7 +39,15 @@ module dbg_axil_sva #(
   end
 
   // ---- reset ----
-  a_rst_valid: assert property (@(posedge clk) !rst_n |-> !bvalid && !rvalid);
+  // Checked during reset, so it must not be disabled by reset: the default
+  // "disable iff (!rst_n)" would make it vacuous (doc/SPEC.md: assertions may
+  // not be disabled by the condition they check; negative test neg_axil_rst).
+  // From the third clock edge of a reset on (the blocks' reset synchronisers
+  // need two edges to propagate a reset that is asserted at time 0).
+  int unsigned n_rst_edges;
+  always @(posedge clk) n_rst_edges <= rst_n ? 0 : n_rst_edges + 1;
+  a_rst_valid: assert property (@(posedge clk) disable iff (1'b0)
+                                !rst_n && n_rst_edges >= 2 |-> !bvalid && !rvalid);
   // ---- no X on handshake signals ----
   a_noX: assert property (!$isunknown({awvalid, wvalid, bvalid, arvalid, rvalid,
                                        awready, wready, bready, arready, rready}));

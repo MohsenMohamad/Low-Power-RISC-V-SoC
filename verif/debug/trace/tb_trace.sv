@@ -8,15 +8,21 @@
 //                 0, state SLEEP / DEEP_SLEEP): whole buffer read back and
 //                 compared; capture resumes after wake
 //
+// The buffer depth is the top-level parameter DEPTH (built once per supported
+// depth: 16, 32, 64, 128). Every entry's timestamp is checked against the
+// window of AON timestamps in which the DUT can have captured it, so a stuck,
+// zero or stale timestamp fails (negative test: +neg_ts_zero forces every
+// captured timestamp to 0 and must fail).
+//
 // Control actions (configuration, enable, clear, freeze, power changes) are
 // applied in quiet windows with no CPU activity, long enough for the
 // clock-domain crossings to settle, so the reference model is exact.
 `timescale 1ns/1ps
-module tb_trace;
+module tb_trace #(
+  parameter int unsigned DEPTH = 32
+);
   import dbg_pkg::*;
   import dbg_tb_pkg::*;
-
-  localparam int unsigned DEPTH = 32;
 
   // ---------------- clocks / reset ----------------
   logic clk_aon = 1'b0, clk_cpu_free = 1'b0, rst_n = 1'b0;
@@ -31,8 +37,8 @@ module tb_trace;
     void'($value$plusargs("TEST=%s", test));
     ccfg = new();
     if (ccfg.randomize() == 0) $fatal(1, "clk_cfg randomize failed");
-    $display("tb_trace: test=%s seed=%0d aon_half=%0dps cpu_half=%0dps phase=%0dps",
-             test, seed, ccfg.aon_half_ps, ccfg.cpu_half_ps, ccfg.cpu_phase_ps);
+    $display("tb_trace: test=%s depth=%0d seed=%0d aon_half=%0dps cpu_half=%0dps phase=%0dps",
+             test, DEPTH, seed, ccfg.aon_half_ps, ccfg.cpu_half_ps, ccfg.cpu_phase_ps);
     fork
       forever #(ccfg.aon_half_ps * 1ps) clk_aon = ~clk_aon;
       begin
@@ -123,7 +129,8 @@ module tb_trace;
   endclass
 
   // ---------------- reference model ----------------
-  typedef struct { logic [31:0] pc, data, info; } ent_t;
+  // ts_lo / ts_hi: window of AON timestamps the DUT may have recorded
+  typedef struct { logic [31:0] pc, data, info, ts_lo, ts_hi; } ent_t;
   class trace_model;
     typedef enum {M_IDLE, M_ARMED, M_ACTIVE, M_STOPPED} mst_t;
     mst_t        st = M_IDLE;
@@ -133,6 +140,9 @@ module tb_trace;
     int unsigned total;
     // coverage-style statistics
     int unsigned n_start[4], n_stop[4], n_frz_exc, n_frz_err, n_frz_sw, n_pwr_ent, n_both;
+
+    // timestamp window of the current cycle (set by the driver before cycle())
+    logic [31:0] ts_lo, ts_hi;
 
     function new(trace_cfg c); cfg = c; endfunction
 
@@ -148,6 +158,7 @@ module tb_trace;
       endcase
     endfunction
     function void push(ent_t e);
+      e.ts_lo = ts_lo; e.ts_hi = ts_hi;
       ents.push_back(e); total++;
       if (ents.size() > DEPTH) void'(ents.pop_front());
     endfunction
@@ -163,11 +174,12 @@ module tb_trace;
       eh  = hit(cfg.stop_sel, cfg.stop_pc(), ret, pc, exc, pwr);
       cap = !frozen && (st == M_ACTIVE || (st == M_ARMED && sh));
       if (cap) begin
-        if (ret) push('{pc: pc, data: insn, info: {30'd0, TE_RETIRE}});
+        if (ret) push('{pc: pc, data: insn, info: {30'd0, TE_RETIRE}, ts_lo: 0, ts_hi: 0});
         if (trap && cfg.log_trap)
-          push('{pc: tpc, data: tval, info: {cause[31], 7'd0, cause[7:0], 12'd0, 2'b00, TE_TRAP}});
+          push('{pc: tpc, data: tval, info: {cause[31], 7'd0, cause[7:0], 12'd0, 2'b00, TE_TRAP},
+                 ts_lo: 0, ts_hi: 0});
         if (pwr && cfg.log_pwr) begin
-          push('{pc: 0, data: 0, info: {28'd0, pstate, TE_PWR}});
+          push('{pc: 0, data: 0, info: {28'd0, pstate, TE_PWR}, ts_lo: 0, ts_hi: 0});
           n_pwr_ent++;
         end
         if (ret && trap) n_both++;
@@ -210,6 +222,21 @@ module tb_trace;
   cpu_burst   stim;
   bit         clk_gated;
   bit         pwr_pending;     // power change not yet seen by clk_cpu
+  logic [31:0] pwr_ts_lo;      // AON timestamp of the first pending power change
+
+  // ---------------- timestamp window ----------------
+  // The DUT stamps an entry with its clk_cpu copy of the AON timestamp
+  // (Gray register in clk_aon, 2-flop synchroniser in clk_cpu): at most
+  // TS_LAG AON cycles behind the AON counter at the capturing clk_cpu edge.
+  int unsigned ts_lag;
+  function automatic logic [31:0] ts_now();
+    return dut.ts_q;            // AON timestamp counter (TSTAMP register)
+  endfunction
+  function automatic void ts_window_now();
+    logic [31:0] hi = ts_now();
+    mdl.ts_hi = hi;
+    mdl.ts_lo = (hi > ts_lag) ? hi - ts_lag : 0;
+  endfunction
 
   // ---------------- CPU-side driver ----------------
   task automatic cpu_quiet(int unsigned n);
@@ -241,6 +268,7 @@ module tb_trace;
       last_trap  = stim.trap[i];
       i++;
       @(posedge clk_cpu);
+      ts_window_now();
       mdl.cycle(ret_valid, ret_pc, ret_insn, trap_valid, trap_cause, trap_pc, trap_tval, 1'b0, 2'b00);
     end
     @(negedge clk_cpu);
@@ -263,6 +291,7 @@ module tb_trace;
   // the clock resumes.
   task automatic set_power(bit [1:0] ps, bit gate);
     bit changed;
+    logic [31:0] ts_change;
     // the PMU gates clk_cpu before leaving RUN and ungates it last on wake
     if (gate && ps != PS_RUN && !clk_gated) begin
       @(negedge clk_cpu_free); cpu_clk_en = 0; clk_gated = 1;
@@ -270,6 +299,7 @@ module tb_trace;
     aon_wait(5);
     changed = (ps != pwr_state);
     @(negedge clk_aon) pwr_state = ps;
+    if (changed && !pwr_pending) pwr_ts_lo = ts_now();   // first change of a coalesced event
     aon_wait(5);
     if (changed) pwr_pending = 1;
     if (clk_gated && ps == PS_RUN) begin
@@ -278,6 +308,10 @@ module tb_trace;
     if (!clk_gated && pwr_pending) begin
       // one (possibly coalesced) event, seen by clk_cpu in a quiet cycle
       settle();
+      // captured when the event reached clk_cpu: after the (first) change,
+      // before now
+      mdl.ts_hi = ts_now();
+      mdl.ts_lo = pwr_ts_lo;
       mdl.cycle(0, 0, 0, 0, 0, 0, 0, 1'b1, pwr_state);
       pwr_pending = 0;
     end
@@ -333,6 +367,9 @@ module tb_trace;
       check_eq(w3, mdl.ents[base + k].info, $sformatf("%s: entry %0d INFO", where, k));
       check(w2 >= last_ts && w2 <= tnow, $sformatf("%s: entry %0d TS 0x%08x not in [0x%08x, 0x%08x]",
                                                    where, k, w2, last_ts, tnow));
+      check(w2 >= mdl.ents[base + k].ts_lo && w2 <= mdl.ents[base + k].ts_hi,
+            $sformatf("%s: entry %0d TS 0x%08x outside its capture window [0x%08x, 0x%08x]",
+                      where, k, w2, mdl.ents[base + k].ts_lo, mdl.ents[base + k].ts_hi));
       last_ts = w2;
     end
   endtask
@@ -391,14 +428,17 @@ module tb_trace;
     aon_wait(20);
     // read the whole buffer while PD_CPU is off (aon-only reads)
     begin
-      logic [31:0] w0, w1, w3;
+      logic [31:0] w0, w1, w2, w3;
       int unsigned base = mdl.ents.size() - DEPTH;
       bfm.rd(R_STATUS, st);
       check(st[2], "pwroff: WRAPPED");
       for (int unsigned k = 0; k < DEPTH; k++) begin
         int unsigned idx = (mdl.total + k) % DEPTH;
         logic [13:0] a = 14'h800 + 14'(idx * 16);
-        bfm.rd(a, w0); bfm.rd(a + 4, w1); bfm.rd(a + 12, w3);
+        bfm.rd(a, w0); bfm.rd(a + 4, w1); bfm.rd(a + 8, w2); bfm.rd(a + 12, w3);
+        check(w2 >= mdl.ents[base + k].ts_lo && w2 <= mdl.ents[base + k].ts_hi,
+              $sformatf("pwroff: entry %0d TS 0x%08x outside [0x%08x, 0x%08x]", k, w2,
+                        mdl.ents[base + k].ts_lo, mdl.ents[base + k].ts_hi));
         check_eq(w0, mdl.ents[base + k].pc,   $sformatf("pwroff: entry %0d PC", k));
         check_eq(w1, mdl.ents[base + k].data, $sformatf("pwroff: entry %0d DATA", k));
         check_eq(w3, mdl.ents[base + k].info, $sformatf("pwroff: entry %0d INFO", k));
@@ -416,6 +456,12 @@ module tb_trace;
     mdl  = new(cfg);
     stim = new();
     bfm.init();
+    // AON cycles: Gray register (1) + 2 clk_cpu synchroniser stages + margin
+    ts_lag = 3 + (4 * ccfg.cpu_half_ps + 2 * ccfg.aon_half_ps - 1) / (2 * ccfg.aon_half_ps);
+    if ($test$plusargs("neg_ts_zero")) begin
+      $display("tb_trace: NEGATIVE TEST: every captured timestamp forced to 0");
+      force dut.ts_c = '0;
+    end
     #(100ns);
     @(negedge clk_aon) rst_n = 1;
     aon_wait(5);
