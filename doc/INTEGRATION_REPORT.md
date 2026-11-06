@@ -1,7 +1,7 @@
 # Integration report
 
 Stage 1: branch `integration`, created from `main` (`4849878`); stage 2: branch
-`stage2` (below). doc/SPEC.md is normative;
+`stage2`; stage 3: branch `stage3` (below). doc/SPEC.md is normative;
 finding IDs (Bxx, Wxx, Cxx) refer to doc/reviews/interface_audit.md.
 
 ## Stage 1: SoC + in-house CPU
@@ -469,3 +469,187 @@ in the Toolchain step with `z3 absent ... need 5.3.3 first on PATH`.
 8. Stage-1 items closed here: item 1 for the firmware branch (merged and
    ported; doc/BOOT_ABI.md written), item 3 (wake mask), item 9 (CI fixed and
    run).
+
+## Stage 3: debug and validation infrastructure on the integrated SoC
+
+Branch `stage3`, created from `main` (`5c39a51`, stage 2 merged). One commit
+per step (`git log 5c39a51..stage3`). doc/SPEC.md stays normative and
+unchanged. Changed first, then implemented: doc/DEBUG_SPEC.md (debug range,
+ports, firmware, bench, regression), doc/SOC_REGMAP.md (debug blocks in the
+memory map, interrupt sources 4 / 5, PMU `STATUS.WDT_RST`, watchdog reset
+sequence), doc/CPU_SOC_INTERFACE.md (debug observability ports),
+doc/BOOT_ABI.md (`rst_cause` WDT, read-only image, host arguments).
+
+### What was taken and what was dropped
+
+From `claude/wonderful-fermat-ll2di5` (head `bd9ca10`), commit `2159ef1`
+(files checked out from that branch; it was not merged, and the UVM branch
+was not merged):
+
+| Taken | Notes |
+|---|---|
+| `rtl/debug/` | trace buffer, event counters, error log, watchdog, `dbg_axil_slave`, `dbg_gray_sync`, `dbg_subsys`; the private wrappers `dbg_sync`, `dbg_rst_sync`, `dbg_ram_2c` were replaced by the SoC's `tech_sync`, `rst_sync` and a new `rtl/tech/tech_ram_2c.sv`; its Makefile, file list and lint config by main's `make lint` |
+| `verif/debug/` | unit testbenches (trace, evcnt, errlog, wdt, subsys), AXI4-Lite SVA checker, trace SVA, UART pty bridge (`integ/dbg_uart_pty_bridge.sv`, `integ/uart_pty.c`); Makefile rewritten (main's RTL list, trace bench per depth) |
+| `fw/debug/` | application, crash handler / dump; ported onto main's tree (below) |
+| `tools/` | `dbg_decode.py` (+ `rv32_disasm.py`, which it imports), `triage.py`, `cov_merge.py`, `tools/bench/` |
+| `doc/DEBUG_SPEC.md`, `doc/TEST_PLAN.md` | rewritten for the integrated SoC |
+
+| Dropped | Reason |
+|---|---|
+| the branch's copy of the firmware branch (`fw/` outside `fw/debug`), `platform/picorv32`, `third_party/picorv32` | main's firmware is authoritative; doc/SPEC.md: the PicoRV32 platform is not part of the design and not a test target |
+| `verif/debug/integ/tb_dbg_soc.sv` | PicoRV32 integration preview (debug blocks on the PicoRV32 SoC's external port, forced register writes for the watchdog reset); replaced by the debug blocks inside `soc_top` and `make dbg-integ` on `sim/tb_soc.sv` |
+| `tools/regress.py`, `tools/regress_suites.toml`, `tools/run_tests.py`, its `.github/workflows/` | main's `make test` / `scripts/regress.py` and CI are authoritative |
+| its `tools/mkimage.py`, `tools/monitor_check.py` | main's versions are authoritative |
+| `fw/debug/Makefile`, `fw/debug/lib/rt64.c`, `fw/debug/include/dbg_regs.h`, `dbg_drv.h`, `fw/debug/drivers/` | one firmware build (GCC 13.2 only; rt64.c was for clang); registers in `fw/include/soc.h`, drivers in `fw/drivers/dbg.c` |
+| `verif/debug/coverage.dat` | a committed build product |
+
+`git grep -il picorv32` lists only doc/SPEC.md (the rule), the audit, this
+report and doc/TEST_PLAN.md (which states the rule's check). The decoder's
+PicoRV32 custom-0 instruction name was removed (`tools/rv32_disasm.py`).
+
+### Conflicts and how they were decided
+
+| # | Conflict | Debug branch | Integrated SoC (main) | Decision | Where |
+|---|---|---|---|---|---|
+| 1 | Debug base address (B14) | `0x4002_0000` (proposal), `0x4F00_4000` (PicoRV32 preview, external port) | range `0x2000_8000`, 32 KB in doc/SPEC.md; SLVERR in stages 1-2 | doc/SPEC.md: trace `0x2000_8000`, counters `0x2000_9000`, error log `0x2000_A000`, watchdog `0x2000_B000`, `0x2000_C000`-`0x2000_FFFF` reserved (SLVERR). `dbg_subsys` is AON interconnect slave 7 (16 KB decoded) | doc/DEBUG_SPEC.md §2, doc/SOC_REGMAP.md, `aon_subsys.sv` |
+| 2 | Retire / trap port (W21) | `ret_valid` = retired only, `trap_valid` = exception or interrupt, 32-bit mcause | commit trace: `trace_valid` also for trapped instructions and interrupt entries, 5-bit cause + irq flag | conversion in `cpu_top` (`dbg_ret_*`, `dbg_trap_*`, flop outputs); SVA for the port contract; the commit trace stays the co-simulation port | `cpu_top.sv`, doc/CPU_SOC_INTERFACE.md |
+| 3 | Cache / stall events (B15) | `ic_hit/ic_miss/dc_hit/dc_miss/stall` | no such outputs | new `ev_hit_o` / `ev_miss_o` in both caches (one pulse per first lookup of a cacheable access, not the replay), `core_top.stall_o`; checked by the cache benches against their reference models | `icache.sv`, `dcache.sv`, `core_top.sv` |
+| 4 | PMU state and transition events (B16, W24) | 2-bit stable state, transition event with result, state changes at most every 4 cycles; preview derived them from FSM ranges | 5-bit FSM state only | PMU outputs a stable state that changes only when a transition completed, an event per completed / refused (ERR_DIRTY, result 3) / aborted (result 2) transition, current OP; result 1 (timeout) is not produced (the PMU has no timeouts). Rate and event contract asserted and proven | `pmu.sv`, doc/DEBUG_SPEC.md §4.4 |
+| 5 | Watchdog reset receiver (B17) | `cpu_rst_req_o` pulse, preview forced a PicoRV32 PMU register | no reset input, no software reset | PMU input `wdt_rst_req_i`, served from RUN (clock gated, retry while the AXI bridge has a transaction in flight, so none is cut), IDLE and OFF; reset without switching off; `STATUS.WDT_RST`, RESUME cleared, boot ROM `rst_cause` WDT | `pmu.sv`, doc/SOC_REGMAP.md "Watchdog reset", doc/BOOT_ABI.md |
+| 6 | Debug interrupts (W23) | `err_irq_o`, `wdt_irq_o`, unconnected | intc sources 0-3, 7:4 reserved | source 4 = error log, 5 = watchdog bark | `aon_subsys.sv`, doc/SOC_REGMAP.md |
+| 7 | Run control | PicoRV32 testbench control device (`SIMCTRL_*`), mailbox at the preview's RAM | host mailbox (boot argument), persistent area | host mailbox extended by three application arguments (seed / iterations / flags, tb `+hostarg0..2`); debug mailbox at `RAM_BASE + 0x300` (persistent area, kept across the watchdog reset) | doc/BOOT_ABI.md, `fw/include/dbg_mbox.h` |
+| 8 | Firmware runtime | own copy of the firmware branch, PicoRV32 arch port, memory-mapped cache driver with range operations, PMU registers WAKE_EN / RST_CAUSE / OFF_TIME, monitor `reset` | main's tree, `mcachectl` only | one tree: debug drivers in `fw/drivers/dbg.c`, app `dbgapp` on main's crt0 / pm / platform / monitor; shared monitor commands `fw/app/app_cmds.c`; cache operations mapped to clean / flush / I-invalidate | `fw/` |
+| 9 | Re-boot of an image without a host | image executed in place (its `.data` is written) | same | the image is read-only at run time: crt0 copies `.data` out of the image, so the boot ROM's CRC check passes after a watchdog reset | `fw/app/crt0.S`, `app.ld`, doc/BOOT_ABI.md |
+| 10 | Bench protocol | firmware branch monitor (`woke: ... wake_src, off_time`, `reset` command, PMU `ID` register) | main's monitor (`wake_cause`, `sleep_cnt`, no reset / ID) | adapter and address map rewritten from doc/SOC_REGMAP.md; reboot = watchdog reset; load through the uncached alias; identity check without an ID register | `tools/bench/` |
+| 11 | Regression | `tools/regress.py` (discovery, own pass patterns), CI workflow | `make test`, required lists, CI | three new `make test` steps with required lists (`dbg-unit`, `dbg-integ`, `bench`); triage, the dump decoder and the coverage merger are tools of those steps | `Makefile`, `scripts/regress.py`, `dv/regress/` |
+| 12 | Technology cells | private `dbg_sync`, `dbg_ram_2c` | `rtl/tech/` wrappers | SoC wrappers, new `tech_ram_2c` | `rtl/tech/tech_ram_2c.sv` |
+| 13 | `+timeout` units (W33) | aon cycles | ns | ns (the bench passes an explicit 60 s) | `tools/bench/sim_bridge.py` |
+
+### Bugs found
+
+RTL:
+
+1. **Trace buffer read window at DEPTH = 128** (debug branch,
+   `dbg_trace.sv`): the entry index was compared with `7'(DEPTH)`, which is 0
+   for 128, so every entry read as 0 (the branch's power-off test reported 513
+   check failures). Reproduced with the new depth-128 benches
+   (`trace_rand_d128`: "entry 0 PC: got 0x00000000 exp 0x00001034"); fixed
+   (8-bit compare). The block was also not lint clean at depth 16.
+2. **Watchdog request lost on a retry** (this stage's first PMU version):
+   the request was consumed when `WDT_GATE` started, so a retry (bus busy at
+   the check) returned to RUN with no reset. Found by the new PMU unit-bench
+   watchdog episodes; now consumed only when the reset commits.
+3. **PMU induction gaps** (this stage): the new debug-state and watchdog
+   assertions needed invariants (`a_mode_lat_powerdown`, `a_wdt_seq_states`)
+   for the k-induction proof; added as assertions. A watchdog request
+   right after power-on (CPU reset still releasing) reached states with the
+   core in reset; RUN now waits for the released reset.
+
+Firmware / verification (false passes, each now with a negative test):
+
+4. Random stress test recorded sleep coverage before the sleep and accepted
+   `PM_ABORTED` (verified: with every sleep aborted the old check printed
+   `STRESS PASS`); negative test `dbg-neg/stress-abort`.
+5. Driver self-test accepted an aborted SLEEP and skipped its counter checks
+   (`dbg-neg/drv-abort`); bench "force power" accepted result 2 and skipped
+   the transition-counter and timing checks (`selftest/bench/power-aborted`,
+   `power-counters-not-skipped`).
+6. Bench accepted PMU ID 0x00000000 (`selftest/bench/pmu-id-zero`); the SoC
+   PMU has no ID register, the identity check uses registers with defined
+   values.
+7. Monitor peek accepted a value reported for the wrong address
+   (`selftest/bench/peek-wrong-address`).
+8. Trace comparator reported "no divergence" after skipping a bad first
+   retirement (old decoder: "no divergence: 24 retired instructions match
+   Spike (from trace entry 1)"; `selftest/dbg_decode/bad-first-retirement`).
+9. Forcing every captured trace timestamp to zero still passed `trace_rand`
+   (only monotonicity was checked); each entry is now checked against its
+   capture window (`neg/trace_ts_zero`).
+10. `dbg_axil_sva` `a_rst_valid` was disabled by `disable iff (!rst_n)`, the
+    condition it checks: silent with both response valids high through reset
+    (verified with the old assertion: TEST PASSED); `neg/axil_rst`.
+11. An expected crash on the monitor path printed `DBGRUN RESULT: FAIL`
+    (the PASS branch fell through), and returned to a monitor without the
+    debug commands.
+
+Bench / flow:
+
+12. **The earlier 11/11 bench result did not reproduce (image load timed
+    out).** The debug branch's PicoRV32 preview cannot be rerun (not part of
+    the design); in the flow on the integrated SoC three causes were found:
+    the bench simulation's simulated-time limit (`+timeout` is in ns, 60 ms
+    default, the load needs about 1.6 s; reproduced: the simulation ended at
+    `poke 0x300013d..` and the load step reported "timeout waiting for
+    'mon> '"; the bridge now passes 60 s and a dead simulation is reported as
+    such instead of crashing the sequencer); the first bench line sent while
+    the target booted overflowed the 8-entry UART RX FIFO and lost its line
+    end, so the monitor waited forever (observed: the first step hung; sync
+    now sends a lone line end first); every poke to the cached RAM window
+    cleaned the whole D-cache (the loader writes through the uncached alias).
+13. The debug trace in the driver test lost the interrupt's trap entry (the
+    trap handler retired more than 64 instructions before the freeze); the
+    test now stops the trace at the trap vector.
+
+### Results
+
+All numbers come from one run of `make test` on branch `stage3` from an
+empty `build/` (same tool versions as stages 1 and 2, `make toolchain`;
+4 CPU cores): 23/23 required steps PASS, exit 0, 3401 s. Re-run a single
+number with the command next to it; `make test` runs all of them.
+
+| Flow | Result | Command |
+|---|---|---|
+| Lint (Verilator -Wall) | SoC with and without SVA (debug blocks, new CPU / cache / PMU ports included), CPU subsystem with and without SVA, debug blocks standalone at trace depths 16 / 32 / 64 / 128: clean | `make lint` |
+| Firmware build | boot ROM 11,824 of 16,384 bytes; images suite 65,568 B, pm_test 11,152 B, boot_test 11,328 B, neg_fail 5,328 B, dbgapp 27,712 B; `.data` copied out of every image | `make fw` |
+| Debug unit benches | 47/47: trace_rand and trace_pwroff at depths 16, 32, 64, 128, evcnt_rand, evcnt_pwr, errlog_rand, wdt_rand, wdt_lock, subsys_smoke, subsys_wdt_chain x seeds 1-3, plus negative tests neg/trace_ts_zero and neg/axil_rst; 33,387 checks. Coverage of the debug RTL (tools/cov_merge.py, reported, not gated): line 93.4 %, toggle 55.1 %, cover properties 50 of 52 (`c_ovf`, `c_stop_pwr` not hit) | `make dbg-unit` |
+| Debug application on the SoC | 16/16: driver and wiring test (32 checks), stress seeds 1-4 (24 iterations each), same-seed reproducibility, expected crashes (mcause 2 and 4, dumps CRC-checked by tools/dbg_decode.py), watchdog hang (1 PMU watchdog reset, boot ROM reset cause WATCHDOG, post-mortem dump), divergence kernel vs Spike (64 of 64 retired instructions match), fault injection seeds 4 / 6 / 20 (3 crashes, 3 dumps), triage (3 signature groups, replay REPRODUCED), negative tests dbg-neg/stress-abort and dbg-neg/drv-abort | `make dbg-integ` |
+| Bench flow through the UART pty | 12/12 steps (identity in ROM monitor and application, image load 27,712 B with read-back CRC and watchdog reboot, wiring test, forced SLEEP / DEEP_SLEEP / IDLE with all counter, timing and error-log checks, DVFS OP2->OP0->OP2, stress, expected crash, final dump); 989 s in make test (the load alone took 678 s in a standalone run) | `make bench` |
+| Validation suite on the SoC | 49/49 required results: 46 tests (new test 37 cache_stats_counters: exact D-cache hit / miss counts from the event counters), suite result, exit line, bench verdict; power coverage goals met (IDLE_REQ->WAKE_REL waived as before) | `make fw-suite` |
+| Validation suite on Spike | `--priv=M` and `--priv=MSU`: 20/20 required each, 28 N/A each (test 37 needs the SoC) | `make fw-spike` |
+| Monitor sessions | application 38 commands, boot ROM 20 commands (debug IDs at 0x2000_8000 / 0x2000_B000, reserved 0x2000_C000 faults) | `make fw-monitor` |
+| Firmware negative tests | 5/5 | `make fw-neg` |
+| SoC pm_test / boot_test | Verilator and Icarus 4-state: PASS, goals met; the debug blocks are in both (Icarus simulates their sv2v translation) | `make sim`, `make sim-x`, `make boot`, `make boot-x` |
+| SoC bench negative tests | 5/5 | `make sim-neg` |
+| PMU unit test | PASS, 400 episodes, 0 holes: 30/30 arcs (6 new watchdog arcs), watchdog reset from RUN 11, IDLE 17, SLEEP 20, DEEP_SLEEP 16, retried with a busy bus 5 | `make sim-pmu` |
+| Formal | 8/8 jobs: `pmu` prove (k-induction, incl. the debug-state rate / event contract and the watchdog assertions) and cover (35 covers: 24 power arcs, 7 watchdog arcs / covers, 2 masked-pending, 2 debug-event); dvfs_mux, async_fifo, cdc_snapshot as before | `make formal` |
+| CPU flows | cosim 202/202 (1,011,421 instructions vs Spike), archtest 63/63, cachetest 24/24 (new debug-event checks against the reference models), coverage gates met (1 waived hole), mutation 21/22 killed + 1 waived (all 22 mutants still apply to the changed RTL) | `make cosim`, `make archtest`, `make cachetest`, `make coverage`, `make mutation` |
+| Checker self-tests | 68/68 (stage 2: 54): new PMU watchdog mutants (bench and proof, 4), bench checks (6), dump decoder (4) | `make selftest` |
+| `make test` | 23/23 required steps (stage 2: 20 + debug/unit, debug/soc, debug/bench), exit 0, 3401 s | `make test` |
+
+Single runs: the debug application on the SoC
+`build/sim/vl/Vtb_soc +rom=build/fw/lpsoc/rom.hex +ram=build/fw/lpsoc/dbgapp.hex +bootarg=8000000<test> +hostarg0=<seed> +hostarg1=<iterations hex> +hostarg2=<flags>`
+(tests: 1 stress, 2 driver / wiring, 3 / 4 expected crash, 5 hang, 6
+divergence); the bench alone
+`python3 tools/bench/sequencer.py tools/bench/testlists/sim_demo.toml --board sim`
+(after `make bench-sim fw`).
+
+Not run: UVM (not merged; commercial simulator), UPF-aware checks, FPGA
+build (later stage).
+
+### Open items
+
+1. Stress-test coverage: the 4 seeds x 24 iterations completed 9 sleeps;
+   the sleep-state x operating-point matrix has 6 of 9 cells (IDLE at OP1,
+   DEEP_SLEEP at OP0 / OP1 missing). There is no goal file for the stress
+   coverage yet; more seeds or iterations, or goals, are needed.
+2. Debug cover properties not hit: `c_ovf` (32-bit event-counter wrap needs
+   a preloadable counter or 2^32 events) and `c_stop_pwr` (stop trigger on a
+   power-state change); `tools/cov_merge.py` reports them, nothing gates
+   them.
+3. The PMU produces no transition result 1 (timeout): it has no timeouts; a
+   missing `power_good` keeps it in PWR_ON. If wanted, doc/SOC_REGMAP.md
+   needs a timeout first.
+4. A watchdog reset loses dirty D-cache lines (documented); RAM keeps what
+   was written back.
+5. The bench load is UART-bound (about 10 typed characters per word, 678 s
+   for 27 KB in simulation); a binary load command in the monitor would
+   need a doc change.
+6. The watchdog reset path from RUN retries while the bridge reports a
+   transaction; a CPU that never leaves the bus idle long enough would not
+   be reset (not observed; the PMU unit bench and formal cover the retry).
+7. Stage-1/2 items still open: WFI-abort arc at SoC level (waived), the
+   write-back error path at SoC level, Spike lockstep on SoC-level firmware,
+   UPF unchecked, UVM branch (the reset-clocking window vs UVM, W07) not
+   merged.
+8. Stage-2 item 1 (debug branch, cache statistics from the debug event
+   counters) is closed here.
