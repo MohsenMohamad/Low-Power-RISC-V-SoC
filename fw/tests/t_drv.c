@@ -81,7 +81,7 @@ static int t_intc(void)
     CHECK_EQ(intc_enabled(), 0xA5);
     intc_set_enabled(0);
     CHECK_EQ(intc_enabled(), 0);
-    CHECK_EQ(intc_pending() & 0xF0u, 0);     /* reserved sources read 0 */
+    CHECK_EQ(intc_pending() & 0xC0u, 0);     /* reserved sources read 0 */
     wtimer_start(5, 0);
     timer_delay(20);
     CHECK_EQ(intc_pending() & IRQ_WTIMER, IRQ_WTIMER);
@@ -208,7 +208,11 @@ static int t_bus_errors(void)
     /* unmapped regions */
     CHECK(ld_faults(0x60000000u));
     CHECK(sw_faults(0x60000000u, 1));
-    CHECK(ld_faults(DEBUG_BASE));                         /* debug blocks: not implemented */
+    CHECK(ld_faults(DBG_BASE + 0x4000u));                 /* reserved half of the debug range */
+    CHECK(ld_faults(DBG_BASE + 0x7FFCu));
+    CHECK(!ld_faults(DBG_BASE));                          /* trace buffer ID */
+    CHECK(ld_faults(DBG_BASE + 0x0030u));                 /* unmapped trace register offset */
+    CHECK(sh_faults(DBG_BASE + 0x2004u, 1));              /* partial write: error log STATUS */
     CHECK(ld_faults(0x20005000u));                        /* gap after the wake timer */
     CHECK(ld_faults(RAM_ALIAS_BASE + SOC_RAM_SIZE));       /* just past the alias */
     CHECK(sw_faults(ROM_BASE + 0x100, 0));                /* ROM write */

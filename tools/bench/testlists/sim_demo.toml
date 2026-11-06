@@ -1,0 +1,73 @@
+# Bench flow against the SoC simulation (make bench): the same list runs on a
+# board with --board <profile>. The simulation starts in the boot ROM monitor
+# (no image in RAM); the first steps identify the target and load the debug
+# application through the monitor.
+[run]
+name = "sim-demo"
+
+[[step]]
+name   = "boot-rom-monitor-and-ids"
+action = "check_ids"
+
+[[step]]
+name   = "load-dbgapp"
+action = "load"
+image  = "build/fw/lpsoc/dbgapp.img"
+start  = "reboot"
+
+[[step]]
+name   = "target-ids-in-application"
+action = "check_ids"
+
+[[step]]
+name   = "driver-and-wiring-test"
+action = "dbgrun"
+test   = 2
+seed   = 1
+
+[[step]]
+name   = "force-sleep"
+action = "power"
+state  = "sleep"
+ticks  = 20000
+
+[[step]]
+name   = "force-dvfs-op0"
+action = "dvfs"
+op     = 0
+
+[[step]]
+name   = "force-deep-sleep-at-op0"
+action = "power"
+state  = "deep"
+ticks  = 40000
+
+[[step]]
+name   = "force-dvfs-op2"
+action = "dvfs"
+op     = 2
+
+[[step]]
+name   = "force-idle"
+action = "power"
+state  = "idle"
+ticks  = 3000
+
+[[step]]
+name   = "stress"
+action = "dbgrun"
+test   = 1
+seed   = 20261105
+iters  = 8
+
+[[step]]
+name   = "crash-illegal-instruction"
+action = "dbgrun"
+test   = 3
+seed   = 1
+expect = "crash"
+mcause = 2
+
+[[step]]
+name   = "final-debug-dump"
+action = "dump"

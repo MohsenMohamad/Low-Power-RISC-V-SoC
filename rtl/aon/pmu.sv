@@ -36,11 +36,22 @@
 // power-down (doc/SPEC.md: PD_CPU is powered down only while idle_ack and
 // cache_clean are both asserted).
 //
+// Watchdog reset (doc/SOC_REGMAP.md "Watchdog reset", audit B17): a rising
+// edge of wdt_rst_req_i (dbg_wdt) is latched in wdt_pend_q and served from the
+// next stable state:
+//   RUN  -> WDT_GATE (gate clk_cpu, raise idle_req) -> WDT_CHECK (the frozen
+//           bridge status settles) -> ISO_ON if the bus is idle, otherwise
+//           CLK_UNGATE -> WAKE_REL -> RUN and retry (no transaction is cut)
+//   IDLE -> ISO_ON (bus idle)
+//   OFF  -> RET_EXIT / PWR_ON (no wake event needed)
+// then ISO_ON -> PWR_ON (the switch stays on) -> RST_CLK_ON -> ... -> RUN.
+// The reset release sets STATUS.WDT_RST and clears RESUME / RESUME_DEEP.
+//
 // Register map (offsets):
 //   0x00 CTRL       RW  [1:0] MODE, [8] LP_EN
 //   0x04 STATUS     [4:0] STATE (RO), [9:8] CUR_OP (RO), [10] DVFS_PEND (RO),
 //                   [16] RESUME, [17] RESUME_DEEP, [18] DVFS_DONE,
-//                   [19] ERR_DIRTY (W1C)
+//                   [19] ERR_DIRTY, [20] WDT_RST (W1C)
 //   0x08 DVFS       RW  [1:0] TARGET_OP
 //   0x0C IRQ_EN     RW  [0] DVFS_DONE interrupt enable
 //   0x10 SCRATCH0   RW  retained scratch (resume context pointer)
@@ -99,13 +110,24 @@ module pmu #(
   input  logic        pwr_good_i,
   output logic        ram_ret_o,
 
+  // watchdog PD_CPU reset request (dbg_wdt.cpu_rst_req_o, clk_aon, pulse)
+  input  logic        wdt_rst_req_i,
+
   // DVFS
   output logic [1:0]        dvfs_sel_o,
   input  logic [NUM_OP-1:0] dvfs_active_i, // synchronized one-hot mux status
   output logic [1:0]        vsel_o,
 
   output logic        irq_o,
-  output logic [4:0]  state_o
+  output logic [4:0]  state_o,
+
+  // Debug observability (doc/DEBUG_SPEC.md 4.4, audit B16 / W24), registered
+  output logic [1:0]  dbg_state_o,       // stable power state: 0 RUN 1 IDLE 2 SLEEP 3 DEEP_SLEEP
+  output logic [1:0]  dbg_op_o,          // current DVFS operating point (CUR_OP)
+  output logic        dbg_evt_valid_o,   // one-cycle pulse: a transition completed or failed
+  output logic [1:0]  dbg_evt_from_o,    // stable state before the transition
+  output logic [1:0]  dbg_evt_to_o,      // requested target state
+  output logic [1:0]  dbg_evt_result_o   // 0 OK, 2 aborted (wake during entry), 3 refused (ERR_DIRTY)
 );
   // ---------------------------------------------------------------------------
   // State encoding (exported for coverage / debug)
@@ -129,8 +151,11 @@ module pmu #(
     ST_RST_REL     = 5'd15,
     ST_ISO_OFF     = 5'd16,
     ST_CLK_UNGATE  = 5'd17,
-    ST_WAKE_REL    = 5'd18
+    ST_WAKE_REL    = 5'd18,
+    ST_WDT_GATE    = 5'd19,
+    ST_WDT_CHECK   = 5'd20
   } state_e;
+  localparam int WDT_SETTLE = 3;   // clk_aon cycles for the frozen bridge status to arrive
 
   localparam logic [1:0] MODE_IDLE  = 2'd0;
   // MODE_SLEEP = 2'd1 (any mode other than IDLE/DEEP powers down without retention)
@@ -149,7 +174,8 @@ module pmu #(
   logic        dvfs_pend;
   logic [1:0]  seq_op_q;     // target latched for the running DVFS sequence
   logic        irq_en_q;
-  logic        st_resume_q, st_resume_deep_q, st_dvfs_done_q, st_err_dirty_q;
+  logic        st_resume_q, st_resume_deep_q, st_dvfs_done_q, st_err_dirty_q, st_wdt_rst_q;
+  logic        wdt_req_q, wdt_pend_q, wdt_seq_q;   // request edge detect, pending, sequence running
   logic [31:0] scratch0_q, scratch1_q;
   logic [2:0]  wake_cause_q;
   logic [31:0] sleep_cnt_q;
@@ -183,7 +209,15 @@ module pmu #(
     cnt_clr = 1'b0;
     unique case (state_q)
       ST_RUN:
-        if (lp_en_q && core_sleep_i) state_d = ST_IDLE_REQ;
+        if (wdt_pend_q && cpu_rst_ack_i)  state_d = ST_WDT_GATE;   // core out of reset
+        else if (lp_en_q && core_sleep_i) state_d = ST_IDLE_REQ;
+      ST_WDT_GATE:
+        if (!cg_ack_i) state_d = ST_WDT_CHECK;
+      ST_WDT_CHECK:
+        if (cnt_q >= 16'(WDT_SETTLE)) begin
+          if (bus_idle_i) state_d = ST_ISO_ON;
+          else            state_d = ST_CLK_UNGATE;      // transaction in flight: retry
+        end
       ST_IDLE_REQ:
         if (idle_ack_i)         state_d = ST_CLK_GATE;
         else if (!core_sleep_i) state_d = ST_WAKE_REL;      // core left WFI
@@ -193,8 +227,11 @@ module pmu #(
           else                         state_d = ST_BUS_DRAIN;
         end
       ST_IDLE:
-        if (dvfs_pend) state_d = ST_DVFS_VUP;
-        else if (wake)   state_d = ST_CLK_UNGATE;
+        if (wdt_pend_q) begin
+          if (bus_idle_i) state_d = ST_ISO_ON;
+        end
+        else if (dvfs_pend) state_d = ST_DVFS_VUP;
+        else if (wake)      state_d = ST_CLK_UNGATE;
       ST_DVFS_VUP:
         if (!vwait_q || cnt_q >= 16'(VSETTLE_CYCLES)) state_d = ST_DVFS_SWITCH;
       ST_DVFS_SWITCH:
@@ -205,11 +242,11 @@ module pmu #(
         if (!cache_clean_i || !idle_ack_i) state_d = ST_IDLE;   // refuse power-down: stay clock gated
         else if (bus_idle_i) state_d = ST_ISO_ON;
       ST_ISO_ON:
-        if (cnt_q >= 16'(ISO_CYCLES) && !cpu_rst_ack_i) state_d = ST_PWR_OFF;
+        if (cnt_q >= 16'(ISO_CYCLES) && !cpu_rst_ack_i) state_d = wdt_seq_q ? ST_PWR_ON : ST_PWR_OFF;
       ST_PWR_OFF:
         if (!pwr_good_i) state_d = ST_OFF;
       ST_OFF:
-        if (wake) begin
+        if (wake || wdt_pend_q) begin
           if (ram_ret_o) state_d = ST_RET_EXIT;
           else           state_d = ST_PWR_ON;
         end
@@ -269,6 +306,10 @@ module pmu #(
           if (state_q == ST_RUN) mode_lat_q <= mode_q;
         end
         ST_CLK_GATE:    cg_en_q <= 1'b0;
+        ST_WDT_GATE: begin
+          cg_en_q    <= 1'b0;
+          idle_req_q <= 1'b1;
+        end
         ST_DVFS_VUP: if (state_q != ST_DVFS_VUP) begin
           vsel_q   <= vup_level;
           vwait_q  <= (vup_level != vsel_q);
@@ -290,7 +331,10 @@ module pmu #(
         end
         ST_OFF:         ram_ret_q <= (mode_lat_q == MODE_DEEP);
         ST_RET_EXIT:    ram_ret_q <= 1'b0;
-        ST_PWR_ON:      pwr_sw_en_q <= 1'b1;
+        ST_PWR_ON: begin
+          pwr_sw_en_q <= 1'b1;
+          idle_req_q  <= 1'b0;        // (already low on the power-off path)
+        end
         ST_RST_CLK_ON:  cg_en_q <= 1'b1;
         ST_RST_CLK_OFF: cg_en_q <= 1'b0;
         ST_RST_REL:     cpu_rst_n_q <= 1'b1;
@@ -299,6 +343,28 @@ module pmu #(
         ST_WAKE_REL:    idle_req_q <= 1'b0;
         default: ;
       endcase
+    end
+  end
+
+  // Watchdog reset request: latched on its rising edge, taken when the reset
+  // sequence commits (isolation / wake from OFF); wdt_seq_q marks the sequence up to the reset release.
+  logic wdt_take;
+  // (consumed only when the reset commits: a retry from WDT_CHECK keeps it)
+  assign wdt_take = (state_q == ST_WDT_CHECK && state_d == ST_ISO_ON) ||
+                    (state_q == ST_IDLE && state_d == ST_ISO_ON) ||
+                    (state_q == ST_OFF && state_d != ST_OFF && wdt_pend_q);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      wdt_req_q  <= 1'b0;
+      wdt_pend_q <= 1'b0;
+      wdt_seq_q  <= 1'b0;
+    end else begin
+      wdt_req_q <= wdt_rst_req_i;
+      if (wdt_rst_req_i && !wdt_req_q) wdt_pend_q <= 1'b1;
+      else if (wdt_take)               wdt_pend_q <= 1'b0;
+      if (state_d == ST_ISO_ON && state_q != ST_ISO_ON && state_q != ST_BUS_DRAIN) wdt_seq_q <= 1'b1;
+      else if (state_q == ST_OFF && state_d != ST_OFF && wdt_pend_q)               wdt_seq_q <= 1'b1;
+      else if (state_q == ST_ISO_OFF && state_d != ST_ISO_OFF)                     wdt_seq_q <= 1'b0;
     end
   end
 
@@ -311,6 +377,76 @@ module pmu #(
   assign dvfs_sel_o  = dvfs_sel_q;
   assign vsel_o      = vsel_q;
   assign state_o     = state_q;
+
+  // ---------------------------------------------------------------------------
+  // Debug observability: stable power state and transition events
+  // ---------------------------------------------------------------------------
+  // The stable state changes only when a transition has completed, never on
+  // intermediate FSM states (audit W24):
+  //   RUN -> IDLE         CLK_GATE -> IDLE (clock gated, CTRL.MODE = IDLE)
+  //   RUN -> SLEEP/DEEP   PWR_OFF -> OFF   (domain switched off)
+  //   RUN -> IDLE         BUS_DRAIN -> IDLE (power-down refused, ERR_DIRTY:
+  //                       event to SLEEP/DEEP with result 3, CPU kept in IDLE)
+  //   any -> RUN          WAKE_REL -> RUN  (wake completed)
+  // An entry aborted by a wake before the core acknowledged (IDLE_REQ ->
+  // WAKE_REL) reports result 2 and leaves the state at RUN. DVFS sequences
+  // run inside IDLE and do not change the state. Result 1 (timeout) is not
+  // produced: the PMU has no timeouts (a missing power_good keeps it in
+  // PWR_ON). The state changes at most once every 4 clk_aon cycles
+  // (a_dbg_state_rate; dbg_trace relies on it).
+  localparam logic [1:0] PS_RUN = 2'd0, PS_IDLE = 2'd1, PS_SLEEP = 2'd2, PS_DSLEEP = 2'd3;
+  localparam logic [1:0] RES_OK = 2'd0, RES_ABORT = 2'd2, RES_REFUSED = 2'd3;
+  logic [1:0] dbg_ps_q, dbg_ps_d, mode_ps;
+  logic       dbg_evt_d;
+  logic [1:0] dbg_from_d, dbg_to_d, dbg_res_d;
+  logic       dbg_evt_q;
+  logic [1:0] dbg_from_q, dbg_to_q, dbg_res_q;
+
+  assign mode_ps = (mode_lat_q == MODE_IDLE) ? PS_IDLE :
+                   (mode_lat_q == MODE_DEEP) ? PS_DSLEEP : PS_SLEEP;
+
+  always_comb begin
+    dbg_ps_d   = dbg_ps_q;
+    dbg_evt_d  = 1'b0;
+    dbg_from_d = dbg_ps_q;
+    dbg_to_d   = mode_ps;
+    dbg_res_d  = RES_OK;
+    if (state_q == ST_CLK_GATE && state_d == ST_IDLE) begin
+      dbg_ps_d = PS_IDLE; dbg_evt_d = 1'b1;
+    end
+    if (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) begin
+      dbg_ps_d = PS_IDLE; dbg_evt_d = 1'b1; dbg_res_d = RES_REFUSED;
+    end
+    if (state_q == ST_PWR_OFF && state_d == ST_OFF) begin
+      dbg_ps_d = mode_ps; dbg_evt_d = 1'b1;
+    end
+    if (state_q == ST_IDLE_REQ && state_d == ST_WAKE_REL) begin
+      dbg_evt_d = 1'b1; dbg_res_d = RES_ABORT;
+    end
+    if (state_q == ST_WAKE_REL && state_d == ST_RUN && dbg_ps_q != PS_RUN) begin
+      dbg_ps_d = PS_RUN; dbg_evt_d = 1'b1; dbg_to_d = PS_RUN;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      dbg_ps_q <= PS_RUN; dbg_evt_q <= 1'b0;
+      dbg_from_q <= PS_RUN; dbg_to_q <= PS_RUN; dbg_res_q <= RES_OK;
+    end else begin
+      dbg_ps_q  <= dbg_ps_d;
+      dbg_evt_q <= dbg_evt_d;
+      if (dbg_evt_d) begin
+        dbg_from_q <= dbg_from_d; dbg_to_q <= dbg_to_d; dbg_res_q <= dbg_res_d;
+      end
+    end
+  end
+
+  assign dbg_state_o      = dbg_ps_q;
+  assign dbg_op_o         = cur_op_q;
+  assign dbg_evt_valid_o  = dbg_evt_q;
+  assign dbg_evt_from_o   = dbg_from_q;
+  assign dbg_evt_to_o     = dbg_to_q;
+  assign dbg_evt_result_o = dbg_res_q;
 
   // ---------------------------------------------------------------------------
   // Register file
@@ -329,6 +465,7 @@ module pmu #(
       st_resume_deep_q <= 1'b0;
       st_dvfs_done_q   <= 1'b0;
       st_err_dirty_q   <= 1'b0;
+      st_wdt_rst_q     <= 1'b0;
       scratch0_q       <= '0;
       scratch1_q       <= '0;
       wake_cause_q     <= '0;
@@ -341,14 +478,15 @@ module pmu #(
         st_dvfs_done_q <= 1'b1;
       end
       if ((state_q == ST_IDLE && state_d == ST_CLK_UNGATE) ||
-          (state_q == ST_OFF  && state_d != ST_OFF))
+          (state_q == ST_OFF  && state_d != ST_OFF && !wdt_pend_q))
         wake_cause_q <= {msip_i, mtip_i, meip_i};
       if (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) st_err_dirty_q <= 1'b1;
       if (state_q == ST_PWR_OFF && state_d == ST_OFF) sleep_cnt_q <= sleep_cnt_q + 32'd1;
       if (state_q == ST_CLK_GATE && state_d == ST_IDLE) idle_cnt_q <= idle_cnt_q + 32'd1;
       if (state_q == ST_RST_REL && state_d == ST_ISO_OFF) begin
-        st_resume_q      <= 1'b1;
-        st_resume_deep_q <= (mode_lat_q == MODE_DEEP);
+        st_resume_q      <= !wdt_seq_q;
+        st_resume_deep_q <= !wdt_seq_q && (mode_lat_q == MODE_DEEP);
+        if (wdt_seq_q) st_wdt_rst_q <= 1'b1;
       end
 
       // software writes (full-word writes only)
@@ -363,6 +501,7 @@ module pmu #(
             if (wdata_i[17]) st_resume_deep_q <= 1'b0;
             if (wdata_i[18]) st_dvfs_done_q   <= 1'b0;
             if (wdata_i[19]) st_err_dirty_q   <= 1'b0;
+            if (wdata_i[20]) st_wdt_rst_q     <= 1'b0;
           end
           10'h2: begin
             if (wdata_i[1:0] < 2'(NUM_OP)) begin
@@ -389,7 +528,7 @@ module pmu #(
     err_o   = we_i && (wstrb_i != 4'hF);
     case (addr_i[11:2])
       10'h0: rdata_o = {23'b0, lp_en_q, 6'b0, mode_q};
-      10'h1: rdata_o = {12'b0, st_err_dirty_q, st_dvfs_done_q, st_resume_deep_q, st_resume_q,
+      10'h1: rdata_o = {11'b0, st_wdt_rst_q, st_err_dirty_q, st_dvfs_done_q, st_resume_deep_q, st_resume_q,
                         5'b0, dvfs_pend, cur_op_q, 3'b0, state_q};
       10'h2: rdata_o = {30'b0, target_op_q};
       10'h3: rdata_o = {31'b0, irq_en_q};
@@ -408,7 +547,7 @@ module pmu #(
   // Assertions (sequencing and isolation). Also proven with SymbiYosys.
   // ---------------------------------------------------------------------------
   // Legal state encoding.
-  `SVA_ASSERT(a_state_legal, clk_i, rst_ni, state_q <= ST_WAKE_REL)
+  `SVA_ASSERT(a_state_legal, clk_i, rst_ni, state_q <= ST_WDT_CHECK)
   // Domain not fully powered => outputs isolated.
   `SVA_ASSERT_IMP(a_iso_when_unpowered, clk_i, rst_ni, !pwr_sw_en_q || !pwr_good_i, iso_en_q)
   // Switch is only off while isolated and held in reset.
@@ -425,7 +564,24 @@ module pmu #(
   // D-cache holds no dirty line.
   `SVA_ASSERT_IMP(a_iso_on_bus_idle, clk_i, rst_ni,
                   iso_en_q && !$past(iso_en_q),
-                  $past(bus_idle_i) && $past(cache_clean_i) && $past(idle_ack_i))
+                  $past(bus_idle_i) && (($past(cache_clean_i) && $past(idle_ack_i)) || wdt_seq_q))
+  // A watchdog reset never switches the domain off; a power-down is never a
+  // watchdog reset sequence.
+  `SVA_ASSERT_IMP(a_wdt_no_pwr_off, clk_i, rst_ni, wdt_seq_q && state_q == ST_ISO_ON, state_d != ST_PWR_OFF)
+  // The watchdog reset path gates a running core's clock only in WDT_GATE and
+  // isolates it only with the bridge idle (a_iso_on_bus_idle).
+  // (A same-cycle software W1C of STATUS cannot happen: the CPU, the only bus
+  // master, is held in reset in RST_REL.)
+  `SVA_ASSERT_NXT(a_wdt_status, clk_i, rst_ni, state_q == ST_RST_REL && state_d == ST_ISO_OFF && wdt_seq_q &&
+                  !(req_i && we_i && addr_i[11:2] == 10'h1),
+                  st_wdt_rst_q && !st_resume_q && !st_resume_deep_q)
+  // The watchdog sequence flag is only set on the reset path itself.
+  `SVA_ASSERT_IMP(a_wdt_seq_states, clk_i, rst_ni, wdt_seq_q,
+                  state_q == ST_ISO_ON || state_q == ST_RET_EXIT || state_q == ST_PWR_ON ||
+                  state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF || state_q == ST_RST_REL ||
+                  state_q == ST_ISO_OFF)
+  // A latched request is never dropped without starting a reset sequence.
+  `SVA_ASSERT_NXT(a_wdt_pend_kept, clk_i, rst_ni, wdt_pend_q && !wdt_take, wdt_pend_q)
   // The switch only turns off with the clock gated and the core in reset.
   `SVA_ASSERT_IMP(a_pwr_off_gated, clk_i, rst_ni,
                   !pwr_sw_en_q && $past(pwr_sw_en_q), !cg_en_q && !$past(cpu_rst_ack_i))
@@ -440,7 +596,8 @@ module pmu #(
   // idle_req/idle_ack handshake has completed.
   `SVA_ASSERT_IMP(a_gate_needs_handshake, clk_i, rst_ni,
                   !cg_en_q && $past(cg_en_q),
-                  ($past(idle_req_q) && $past(idle_ack_i)) || !$past(cpu_rst_n_q))
+                  ($past(idle_req_q) && $past(idle_ack_i)) || !$past(cpu_rst_n_q) ||
+                  state_q == ST_WDT_GATE)
   // idle_req stays asserted while a powered, running core is clock gated.
   `SVA_ASSERT_IMP(a_gated_keeps_idle_req, clk_i, rst_ni,
                   !cg_en_q && pwr_sw_en_q && !iso_en_q && cpu_rst_n_q && state_q != ST_ISO_OFF,
@@ -461,7 +618,7 @@ module pmu #(
 `endif
   `SVA_ASSERT_IMP(a_ctl_run,      clk_i, rst_ni, state_q == ST_RUN || state_q == ST_IDLE_REQ ||
                                   state_q == ST_CLK_UNGATE || state_q == ST_WAKE_REL, ctl == 5'b10110)
-  `SVA_ASSERT_IMP(a_ctl_gated,    clk_i, rst_ni, (state_q == ST_CLK_GATE || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_OFF), ctl == 5'b10100)
+  `SVA_ASSERT_IMP(a_ctl_gated,    clk_i, rst_ni, (state_q == ST_CLK_GATE || state_q == ST_WDT_GATE || state_q == ST_WDT_CHECK || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_OFF), ctl == 5'b10100)
   `SVA_ASSERT_IMP(a_ctl_iso,      clk_i, rst_ni, state_q == ST_ISO_ON || state_q == ST_PWR_ON ||
                                   state_q == ST_RST_CLK_OFF, ctl == 5'b11000)
   `SVA_ASSERT_IMP(a_ctl_off,      clk_i, rst_ni, state_q == ST_PWR_OFF || state_q == ST_RET_EXIT,
@@ -470,7 +627,7 @@ module pmu #(
                                   ctl == {4'b0100, mode_lat_q == MODE_DEEP})
   `SVA_ASSERT_IMP(a_ctl_rstclk,   clk_i, rst_ni, state_q == ST_RST_CLK_ON, ctl == 5'b11010)
   `SVA_ASSERT_IMP(a_ctl_rstrel,   clk_i, rst_ni, state_q == ST_RST_REL, ctl == 5'b11100)
-  `SVA_ASSERT_IMP(a_req_idle,     clk_i, rst_ni, (state_q == ST_IDLE_REQ || state_q == ST_CLK_GATE || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_ON),
+  `SVA_ASSERT_IMP(a_req_idle,     clk_i, rst_ni, (state_q == ST_IDLE_REQ || state_q == ST_WDT_GATE || state_q == ST_WDT_CHECK || state_q == ST_CLK_GATE || state_q == ST_IDLE || state_q == ST_DVFS_VUP || state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN || state_q == ST_BUS_DRAIN || state_q == ST_ISO_ON),
                                   idle_req_q)
   `SVA_ASSERT_IMP(a_req_off,      clk_i, rst_ni, (state_q == ST_RUN || state_q == ST_PWR_OFF || state_q == ST_OFF || state_q == ST_RET_EXIT || state_q == ST_PWR_ON || state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF || state_q == ST_RST_REL || state_q == ST_ISO_OFF || state_q == ST_WAKE_REL), !idle_req_q)
   // DVFS bookkeeping: outside a sequence the mux and regulator sit at cur_op.
@@ -490,11 +647,11 @@ module pmu #(
   `SVA_ASSERT_IMP(a_wake_masked, clk_i, rst_ni,
                   (state_q == ST_IDLE && state_d == ST_CLK_UNGATE) ||
                   (state_q == ST_OFF && state_d != ST_OFF),
-                  (wake_src & wake_mask_q) != 3'b000)
+                  (wake_src & wake_mask_q) != 3'b000 || wdt_pend_q)
   // A pending source that is masked out keeps the PMU in IDLE / OFF.
   `SVA_ASSERT_IMP(a_masked_holds, clk_i, rst_ni,
                   (state_q == ST_IDLE || state_q == ST_OFF) && (wake_src & wake_mask_q) == 3'b000 &&
-                  !(state_q == ST_IDLE && dvfs_pend),
+                  !(state_q == ST_IDLE && dvfs_pend) && !wdt_pend_q,
                   state_d == state_q)
   // IDLE_CNT counts exactly the CLK_GATE -> IDLE entries.
   `SVA_ASSERT_NXT(a_idle_cnt, clk_i, rst_ni, state_q == ST_CLK_GATE && state_d == ST_IDLE,
@@ -504,6 +661,55 @@ module pmu #(
   // Masked-out pending interrupt while gated / off (the case the mask exists for).
   `SVA_COVER(c_idle_masked_pending, clk_i, rst_ni, state_q == ST_IDLE && wake_src != 3'b000 && !wake)
   `SVA_COVER(c_off_masked_pending,  clk_i, rst_ni, state_q == ST_OFF  && wake_src != 3'b000 && !wake)
+
+  // Debug state / event contract (doc/DEBUG_SPEC.md 4.4).
+`ifdef PMU_CTL_USED
+  logic [2:0] dbg_age_q;   // clk_aon cycles since the stable state last changed (saturating)
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)                    dbg_age_q <= 3'd7;
+    else if (dbg_ps_d != dbg_ps_q)  dbg_age_q <= 3'd0;
+    else if (dbg_age_q != 3'd7)     dbg_age_q <= dbg_age_q + 3'd1;
+  end
+`endif
+  // The stable state changes at most once every 4 clk_aon cycles (W24).
+  `SVA_ASSERT_IMP(a_dbg_state_rate, clk_i, rst_ni, dbg_ps_d != dbg_ps_q, dbg_age_q >= 3'd3)
+  // The stable state matches the FSM: RUN-side states report RUN, the
+  // gated states IDLE, the off / wake-from-off states SLEEP or DEEP_SLEEP.
+  `SVA_ASSERT_IMP(a_dbg_ps_run, clk_i, rst_ni, state_q == ST_RUN || state_q == ST_IDLE_REQ ||
+                  state_q == ST_CLK_GATE || state_q == ST_BUS_DRAIN ||
+                  (state_q == ST_ISO_ON && !wdt_seq_q) || state_q == ST_PWR_OFF ||
+                  state_q == ST_WDT_GATE || state_q == ST_WDT_CHECK, dbg_ps_q == PS_RUN)
+  `SVA_ASSERT_IMP(a_dbg_ps_idle, clk_i, rst_ni, state_q == ST_IDLE || state_q == ST_DVFS_VUP ||
+                  state_q == ST_DVFS_SWITCH || state_q == ST_DVFS_VDN, dbg_ps_q == PS_IDLE)
+  `SVA_ASSERT_IMP(a_dbg_ps_off, clk_i, rst_ni, (state_q == ST_OFF || state_q == ST_RET_EXIT ||
+                  state_q == ST_PWR_ON || state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF ||
+                  state_q == ST_RST_REL || state_q == ST_ISO_OFF) && !wdt_seq_q,
+                  dbg_ps_q == (mode_lat_q == MODE_DEEP ? PS_DSLEEP : PS_SLEEP))
+  // The power-down / wake-from-off states are only reached for a SLEEP or
+  // DEEP_SLEEP request (invariant that also strengthens the induction proof).
+  `SVA_ASSERT_IMP(a_mode_lat_powerdown, clk_i, rst_ni, (state_q == ST_BUS_DRAIN || state_q == ST_ISO_ON ||
+                  state_q == ST_PWR_OFF || state_q == ST_OFF || state_q == ST_RET_EXIT ||
+                  state_q == ST_PWR_ON || state_q == ST_RST_CLK_ON || state_q == ST_RST_CLK_OFF ||
+                  state_q == ST_RST_REL || state_q == ST_ISO_OFF) && !wdt_seq_q, mode_lat_q != MODE_IDLE)
+  // An event is reported exactly for a completed, refused or aborted transition.
+  `SVA_ASSERT_NXT(a_dbg_evt_complete, clk_i, rst_ni,
+                  (state_q == ST_CLK_GATE && state_d == ST_IDLE) ||
+                  (state_q == ST_PWR_OFF && state_d == ST_OFF),
+                  dbg_evt_valid_o && dbg_evt_result_o == RES_OK && dbg_evt_from_o == PS_RUN &&
+                  dbg_evt_to_o == dbg_state_o)
+  `SVA_ASSERT_NXT(a_dbg_evt_refused, clk_i, rst_ni, state_q == ST_BUS_DRAIN && state_d == ST_IDLE,
+                  dbg_evt_valid_o && dbg_evt_result_o == RES_REFUSED && dbg_state_o == PS_IDLE &&
+                  dbg_evt_to_o != PS_IDLE && dbg_evt_to_o != PS_RUN)
+  `SVA_ASSERT_NXT(a_dbg_evt_abort, clk_i, rst_ni, state_q == ST_IDLE_REQ && state_d == ST_WAKE_REL,
+                  dbg_evt_valid_o && dbg_evt_result_o == RES_ABORT && dbg_state_o == PS_RUN)
+  `SVA_ASSERT_IMP(a_dbg_evt_only, clk_i, rst_ni, dbg_evt_d,
+                  (state_q == ST_CLK_GATE && state_d == ST_IDLE) ||
+                  (state_q == ST_BUS_DRAIN && state_d == ST_IDLE) ||
+                  (state_q == ST_PWR_OFF && state_d == ST_OFF) ||
+                  (state_q == ST_IDLE_REQ && state_d == ST_WAKE_REL) ||
+                  (state_q == ST_WAKE_REL && state_d == ST_RUN))
+  `SVA_COVER(c_dbg_evt_wake,   clk_i, rst_ni, dbg_evt_valid_o && dbg_evt_to_o == PS_RUN)
+  `SVA_COVER(c_dbg_evt_refuse, clk_i, rst_ni, dbg_evt_valid_o && dbg_evt_result_o == RES_REFUSED)
 
   // Transition coverage (every FSM arc).
   `SVA_COVER(c_run_idlereq,      clk_i, rst_ni, state_q == ST_RUN         && state_d == ST_IDLE_REQ)
@@ -529,5 +735,12 @@ module pmu #(
   `SVA_COVER(c_rstrel_isooff,    clk_i, rst_ni, state_q == ST_RST_REL     && state_d == ST_ISO_OFF)
   `SVA_COVER(c_isooff_ungate,    clk_i, rst_ni, state_q == ST_ISO_OFF     && state_d == ST_CLK_UNGATE)
   `SVA_COVER(c_ungate_wakerel,   clk_i, rst_ni, state_q == ST_CLK_UNGATE  && state_d == ST_WAKE_REL)
+  `SVA_COVER(c_run_wdtgate,      clk_i, rst_ni, state_q == ST_RUN         && state_d == ST_WDT_GATE)
+  `SVA_COVER(c_wdtgate_check,    clk_i, rst_ni, state_q == ST_WDT_GATE    && state_d == ST_WDT_CHECK)
+  `SVA_COVER(c_wdtcheck_iso,     clk_i, rst_ni, state_q == ST_WDT_CHECK   && state_d == ST_ISO_ON)
+  `SVA_COVER(c_wdtcheck_retry,   clk_i, rst_ni, state_q == ST_WDT_CHECK   && state_d == ST_CLK_UNGATE)
+  `SVA_COVER(c_idle_wdt_iso,     clk_i, rst_ni, state_q == ST_IDLE        && state_d == ST_ISO_ON)
+  `SVA_COVER(c_iso_pwron_wdt,    clk_i, rst_ni, state_q == ST_ISO_ON      && state_d == ST_PWR_ON)
+  `SVA_COVER(c_off_wdt,          clk_i, rst_ni, state_q == ST_OFF         && state_d != ST_OFF && wdt_pend_q)
   `SVA_COVER(c_wakerel_run,      clk_i, rst_ni, state_q == ST_WAKE_REL    && state_d == ST_RUN)
 endmodule

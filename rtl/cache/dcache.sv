@@ -72,7 +72,13 @@ module dcache #(
 /* verilator lint_on UNUSEDSIGNAL */
 
   // Status for coverage / power management
-  output logic        idle_o
+  output logic        idle_o,
+  // Debug events (doc/CPU_SOC_INTERFACE.md "Debug observability"): one pulse per
+  // cacheable load / store lookup, in the cycle the first tag compare
+  // resolves. The compare after a refill (replay) is not a second lookup;
+  // uncached accesses and maintenance count as neither.
+  output logic        ev_hit_o,
+  output logic        ev_miss_o
 );
 
   localparam int WAYS  = 2;
@@ -181,6 +187,16 @@ module dcache #(
   assign wb_err_o      = wb_err_q;
   assign cache_clean_o = clean_q;
   assign idle_o   = (state_q == S_IDLE);
+
+  // Debug events: replay_q marks the lookup that follows a refill.
+  logic replay_q;
+  assign ev_hit_o  = (state_q == S_LOOKUP) && hit && !replay_q;
+  assign ev_miss_o = (state_q == S_LOOKUP) && !hit;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)                    replay_q <= 1'b0;
+    else if (state_q == S_REPLAY)  replay_q <= 1'b1;
+    else if (state_q == S_LOOKUP)  replay_q <= 1'b0;
+  end
 
   // ---------------------------------------------------------------------------
   // Combinational control

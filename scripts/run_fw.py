@@ -27,6 +27,25 @@ recording what each run produced.
                                 aligned (header CRC correct): the boot ROM
                                 must reject it and start its monitor
              rom-bad-image-crc  an image with a wrong CRC: rejected likewise
+  dbg      debug application (fw/debug, doc/DEBUG_SPEC.md) on the integrated
+           SoC, boot argument = test id, host arguments = seed / iterations /
+           flags. Crash dumps are judged by tools/dbg_decode.py (CRC, reason,
+           mcause), the fault-injection runs by tools/triage.py:
+             dbg/drv              debug drivers and wiring (W21 B15 B16 W23)
+             dbg/stress-s<seed>   seeded random stress test
+             dbg/stress-repro     same seed twice: identical operation log
+             dbg/crash-illegal    expected crash: dump with mcause 2
+             dbg/crash-misalign   expected crash: dump with mcause 4, mtval
+             dbg/hang             watchdog reset of PD_CPU, post-mortem dump
+             dbg/divtest          trace vs Spike: no divergence
+             dbg/inject-s<seed>   stress with fault injection: must crash
+                                  with a valid dump
+             dbg/triage           triage groups every injected failure by its
+                                  dump signature; a replay reproduces it
+             dbg-neg/stress-abort negative test: every sleep of the stress test
+                                  is aborted (wake already pending): must FAIL
+             dbg-neg/drv-abort    negative test: the driver test's SLEEP and IDLE
+                                  are aborted: must FAIL
 """
 import argparse
 import json
@@ -198,9 +217,188 @@ def m_neg(a):
     save(a.out, res)
 
 
+# ---------------------------------------------------------------------------
+def _tool(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, "tools", name + ".py"))
+    m = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    spec.loader.exec_module(m)
+    return m
+
+
+def dbg_dumps(uart_log):
+    """Crash dumps of a UART log (tools/dbg_decode.py), [] if none / unreadable."""
+    dec = _tool("dbg_decode")
+    try:
+        return dec.parse_dumps(open(uart_log, errors="replace").read())
+    except (OSError, dec.DumpError):
+        return []
+
+
+def m_dbg(a):
+    import concurrent.futures as cf
+    seeds = [int(x, 0) for x in a.dbg_seeds.split()]
+    inject = [int(x, 0) for x in a.dbg_inject_seeds.split()]
+    img = f"{a.fw}/dbgapp.hex"
+
+    def sim(name, test, seed=0, iters=0, flags=0, timeout_ns=400000000):
+        ulog = os.path.join(a.out, f"{name}.uart")
+        cmd = sim_cmd(a, f"{a.fw}/rom.hex", img,
+                      [f"+bootarg={0x80000000 | test:08x}", f"+hostarg0={seed:x}", f"+hostarg1={iters:x}",
+                       f"+hostarg2={flags:x}", f"+uart_log={ulog}", f"+timeout={timeout_ns}",
+                       f"+cov={a.out}/cov_{name}.txt"])
+        rc, out = run(cmd, os.path.join(a.out, f"{name}.log"), a.timeout)
+        return {"name": name, "rc": rc, "out": out, "uart": ulog, "cmd": cmd, "seed": seed}
+
+    jobs = [("drv", 2, 0, 0, 0)] + [(f"stress-s{s}", 1, s, a.dbg_iters, 0) for s in seeds] + \
+           [("stress-repro", 1, seeds[0], a.dbg_iters, 0), ("crash-illegal", 3, 0, 0, 0),
+            ("crash-misalign", 4, 0, 0, 0), ("hang", 5, 0, 0, 0), ("divtest", 6, 0, 0, 0)] + \
+           [(f"inject-s{s}", 1, s, a.dbg_iters, 1) for s in inject] + \
+           [("neg-stress-abort", 1, seeds[0], a.dbg_iters, 4), ("neg-drv-abort", 2, 0, 0, 4)]
+    with cf.ThreadPoolExecutor(a.jobs) as ex:
+        runs = {r["name"]: r for r in ex.map(lambda j: sim(*j), jobs)}
+    res = []
+
+    def rec(rid, ok, detail):
+        print(f"  {'PASS' if ok else 'FAIL'} dbg/{rid:18s} {detail}")
+        res.append({"id": f"dbg/{rid}", "status": "PASS" if ok else "FAIL", "detail": detail})
+
+    r = runs["drv"]
+    fails = re.findall(r"\[DBGT\] (.*?)\s+FAIL", r["out"])
+    npass = len(re.findall(r"\[DBGT\] .* PASS", r["out"]))
+    rec("drv", bench_ok(r["rc"], r["out"]) and "DBGTEST RESULT: PASS" in r["out"] and not fails and npass > 0,
+        f"{npass} checks passed" + (f", failed: {fails}" if fails else ""))
+    for s in seeds:
+        r = runs[f"stress-s{s}"]
+        rec(f"stress-s{s}", bench_ok(r["rc"], r["out"]) and f"STRESS PASS seed=0x{s:08x}" in r["out"]
+            and not dbg_dumps(r["uart"]), f"seed {s}, {a.dbg_iters} iterations, exit {r['rc']}")
+
+    def oplog(text):
+        return [l for l in text.replace("\r", "").splitlines() if re.match(r"^(I \d+ op=|COV |STRESS )", l)]
+    l1 = oplog(open(runs[f"stress-s{seeds[0]}"]["uart"], errors="replace").read())
+    l2 = oplog(open(runs["stress-repro"]["uart"], errors="replace").read())
+    rec("stress-repro", bool(l1) and l1 == l2 and bench_ok(runs["stress-repro"]["rc"], runs["stress-repro"]["out"]),
+        f"seed {seeds[0]}: {len(l1)} operation / coverage lines, identical: {l1 == l2}")
+
+    for name, cause, tval_check in (("crash-illegal", 2, False), ("crash-misalign", 4, True)):
+        r = runs[name]
+        d = dbg_dumps(r["uart"])
+        ok = (bench_ok(r["rc"], r["out"]) and len(d) == 1 and d[0]["crc_ok"] and d[0]["reason"] == "exception"
+              and d[0]["csr"].get("mcause") == cause and d[0]["errlog"].get("exc_cause") == cause
+              and d[0]["errlog"].get("exc_pc") == d[0]["csr"].get("mepc")
+              and (not tval_check or d[0]["csr"].get("mtval", 0) & 3 == 2))
+        rec(name, ok, f"{len(d)} dump(s)" + (f", CRC {'ok' if d[0]['crc_ok'] else 'BAD'}, reason {d[0]['reason']}, "
+                                              f"mcause {d[0]['csr'].get('mcause')}" if d else ""))
+    r = runs["hang"]
+    d = dbg_dumps(r["uart"])
+    cov = open(f"{a.out}/cov_hang.txt", errors="replace").read() if os.path.exists(f"{a.out}/cov_hang.txt") else ""
+    m = re.search(r"COV wdt resets (\d+)", cov)
+    ok = (bench_ok(r["rc"], r["out"]) and "reset cause WATCHDOG" in r["out"] and len(d) == 1 and d[0]["crc_ok"]
+          and d[0]["reason"] == "watchdog" and d[0]["errlog"].get("status", 0) & 0x18 == 0x18
+          and d[0]["errlog"].get("wdt_cnt") == 1 and m is not None and int(m.group(1)) == 1
+          and "DBGTEST hang detected by the watchdog: PASS" in r["out"])
+    rec("hang", ok, f"PMU watchdog resets {m.group(1) if m else '?'}, {len(d)} post-mortem dump(s)"
+        + (f", reason {d[0]['reason']}" if d else ""))
+
+    r = runs["divtest"]
+    d = dbg_dumps(r["uart"])
+    km = re.search(r"DIVTEST kernel=0x([0-9a-f]+)", r["out"])
+    det = "no dump / kernel address"
+    ok = False
+    if d and km and bench_ok(r["rc"], r["out"]):
+        # Spike executes the same kernel at the same address (harness
+        # fw/debug/spike_divk.S, linked with the kernel placed where the
+        # debug application has it), with memory at the RAM window and the
+        # trace buffer page (the kernel's final store)
+        slog = os.path.join(a.out, "divtest_spike.log")
+        selfp = os.path.join(a.out, "divtest_spike.elf")
+        n = sum(1 for t in d[0]["trace"] if t["info"] & 3 == 0)
+        kaddr = int(km.group(1), 16)
+        cc = shutil.which(a.rv_prefix + "gcc") or a.rv_prefix + "gcc"
+        lds = os.path.join(a.out, "divtest_spike.ld")
+        with open(lds, "w") as f:
+            f.write("ENTRY(_start)\nSECTIONS {\n"
+                    f"  . = 0x{kaddr - 0x1000:x}; .start : {{ *(.text.start) }}\n"
+                    f"  . = 0x{kaddr:x}; .kernel : {{ *(.text.dbg_div) }}\n"
+                    "  . = 0x1001f000; .tohost : { *(.tohost) }\n}\n")
+        try:
+            bp = subprocess.run([cc, "-march=rv32im_zicsr_zifencei", "-mabi=ilp32", "-nostdlib", "-nostartfiles",
+                                 "-I" + os.path.join(ROOT, "fw/include"), "-I" + os.path.join(ROOT, "fw/platform/lpsoc"),
+                                 "-T", lds, "-Wl,--no-warn-rwx-segments",
+                                 "-o", selfp, os.path.join(ROOT, "fw/debug/spike_divk.S"),
+                                 os.path.join(ROOT, "fw/debug/dbg_div_kernel.S")],
+                                capture_output=True, text=True, timeout=120)
+            if bp.returncode:
+                raise OSError("harness build failed: " + bp.stderr[-300:])
+            p = subprocess.run([a.spike, "-l", f"--log={slog}", "--isa=rv32im_zicsr_zifencei",
+                                "-m0x10001000:0x1f000,0x20008000:0x1000", selfp],
+                               capture_output=True, text=True, timeout=120)
+            dec = _tool("dbg_decode")
+            dv = dec.divergence(d[0]["trace"], dec.parse_spike(open(slog, errors="replace").read()))
+            ok = (d[0]["crc_ok"] and dv["status"] == "match" and dv.get("skipped", 0) == 0
+                  and dv["matched"] == n and n >= 32)
+            det = f"{n} retired in trace; Spike: {dv['detail']}"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            det = f"Spike did not run: {e}"
+    rec("divtest", ok, det)
+
+    # negative tests (DBG_F_NEG_ABORT = 4): an aborted transition must fail the run
+    r = runs["neg-stress-abort"]
+    det = "STRESS CHECK FAILED: sleep transition ABORTED" in r["out"]
+    res_ok = r["rc"] != 0 and "[tb] TEST FAILED" in r["out"] and det and "STRESS PASS" not in r["out"]
+    print(f"  {'PASS' if res_ok else 'FAIL'} dbg-neg/stress-abort  "
+          f"{'aborted sleep reported as a failure' if res_ok else 'NOT DETECTED: run did not fail on the aborted sleep'}")
+    res.append({"id": "dbg-neg/stress-abort", "status": "PASS" if res_ok else "FAIL"})
+    r = runs["neg-drv-abort"]
+    det = re.search(r"\[DBGT\] SLEEP completed and resumed \(not ABORTED\)\s+FAIL", r["out"]) is not None
+    res_ok = r["rc"] != 0 and "[tb] TEST FAILED" in r["out"] and det and "DBGTEST RESULT: FAIL" in r["out"]
+    print(f"  {'PASS' if res_ok else 'FAIL'} dbg-neg/drv-abort     "
+          f"{'aborted SLEEP reported as a failure' if res_ok else 'NOT DETECTED: driver test accepted the aborted SLEEP'}")
+    res.append({"id": "dbg-neg/drv-abort", "status": "PASS" if res_ok else "FAIL"})
+
+    # fault injection: each run must end in a crash dump (it is a failing run
+    # by design); triage groups them by signature and must reproduce one
+    os.makedirs(os.path.join(a.out, "inject"), exist_ok=True)
+    tests = []
+    for s in inject:
+        r = runs[f"inject-s{s}"]
+        d = dbg_dumps(r["uart"])
+        crashed = r["rc"] != 0 and "INJECT kind=" in open(r["uart"], errors="replace").read()
+        good = bool(d) and all(x["crc_ok"] for x in d) and d[-1]["reason"] in ("exception", "watchdog")
+        rec(f"inject-s{s}", crashed and good,
+            f"{'crashed' if crashed else 'did not crash'}, {len(d)} dump(s)" +
+            (f", last reason {d[-1]['reason']}" if d else ""))
+        shutil.copy(r["uart"], os.path.join(a.out, "inject", f"stress_s{s}.uart"))
+        tests.append({"suite": "dbg", "name": "stress", "seed": s, "status": "FAIL" if r["rc"] else "PASS",
+                      "cmd": r["cmd"], "cwd": ROOT, "artifacts": os.path.join(a.out, "inject"),
+                      "log": os.path.join(a.out, f"inject-s{s}.log")})
+    json.dump({"tests": tests}, open(os.path.join(a.out, "inject", "results.json"), "w"), indent=1)
+    tri = _tool("triage")
+    db = os.path.join(a.out, "inject", "seeds.json")
+    trc, tout = run([PY, os.path.join(ROOT, "tools/triage.py"), os.path.join(a.out, "inject"), "--db", db],
+                    os.path.join(a.out, "triage.log"), 600)
+    groups = re.search(r"(\d+) failing, (\d+) signature group", tout)
+    unknown = re.search(r"\b(unknown|timeout \(no crash dump\))\b", tout)
+    rrc, rout = run([PY, os.path.join(ROOT, "tools/triage.py"), "--db", db, "--replay", str(inject[0]),
+                     "--timeout", str(a.timeout)], os.path.join(a.out, "triage_replay.log"), a.timeout + 60)
+    ok = (trc == 0 and groups is not None and int(groups.group(1)) == len(inject) and int(groups.group(2)) >= 1
+          and not unknown and rrc == 0 and "REPRODUCED" in rout)
+    rec("triage", ok, (f"{groups.group(1)} failing runs in {groups.group(2)} signature group(s)" if groups else
+                       "no triage summary") + f"; replay of seed {inject[0]}: " +
+        ("REPRODUCED" if "REPRODUCED" in rout else "not reproduced"))
+    del tri
+    save(a.out, res)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["suite", "spike", "monitor", "neg"])
+    ap.add_argument("mode", choices=["suite", "spike", "monitor", "neg", "dbg"])
+    ap.add_argument("--dbg-seeds", default="1 2 3 4", help="dbg: stress-test seeds")
+    ap.add_argument("--dbg-inject-seeds", default="5 6", help="dbg: fault-injection seeds")
+    ap.add_argument("--dbg-iters", type=int, default=24, help="dbg: stress iterations")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count())
+    ap.add_argument("--rv-prefix", default="riscv64-unknown-elf-", help="dbg: cross compiler prefix (Spike harness)")
     ap.add_argument("--vl", default=os.path.join(ROOT, "build/sim/vl/Vtb_soc"))
     ap.add_argument("--fw", default=os.path.join(ROOT, "build/fw/lpsoc"))
     ap.add_argument("--spike", default=shutil.which("spike") or "/opt/spike/bin/spike")
@@ -211,7 +409,7 @@ def main():
     a.out = os.path.abspath(a.out)
     shutil.rmtree(a.out, ignore_errors=True)
     os.makedirs(a.out)
-    {"suite": m_suite, "spike": m_spike, "monitor": m_monitor, "neg": m_neg}[a.mode](a)
+    {"suite": m_suite, "spike": m_spike, "monitor": m_monitor, "neg": m_neg, "dbg": m_dbg}[a.mode](a)
     return 0
 
 

@@ -1,0 +1,18 @@
+# Debug application on the integrated SoC (scripts/run_fw.py dbg, make dbg-integ).
+# Stress seeds DBG_STRESS_SEEDS = 1 2 3 4; fault-injection seeds DBG_INJECT_SEEDS
+# = 4 6 20 (each injects a different fault early: misaligned load, illegal
+# instruction, load access fault).
+dbg/drv
+dbg/stress-s{1..4}
+dbg/stress-repro
+dbg/crash-illegal
+dbg/crash-misalign
+dbg/hang
+dbg/divtest
+dbg/inject-s4
+dbg/inject-s6
+dbg/inject-s20
+dbg/triage
+# negative tests: an aborted transition must fail the stress test and the driver test
+dbg-neg/stress-abort
+dbg-neg/drv-abort

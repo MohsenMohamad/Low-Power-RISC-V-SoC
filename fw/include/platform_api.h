@@ -27,6 +27,7 @@ uint32_t platform_caps(void);
 void     platform_putc(char c);
 int      platform_getc(void);              /* -1 if no character        */
 uint32_t platform_boot_arg(void);
+uint32_t platform_host_arg(unsigned i);    /* application argument i (0..2), 0 if none */
 /* End of run: prints "PASS" (code 0) or "FAIL 0x<code>" as the last console
  * line (lpsoc: the testbench completion ABI) and stops. */
 void     platform_exit(uint32_t code) __attribute__((noreturn));

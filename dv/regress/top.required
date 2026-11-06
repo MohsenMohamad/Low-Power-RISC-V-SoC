@@ -15,6 +15,9 @@ fw/suite-soc
 fw/suite-spike
 fw/monitor
 fw/negative
+debug/unit
+debug/soc
+debug/bench
 pmu/unit
 formal
 mutation

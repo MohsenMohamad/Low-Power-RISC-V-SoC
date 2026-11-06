@@ -9,9 +9,10 @@
  * power-down and what another bus master would see.
  *
  * Operations the hardware does not have (line operations, dirty-discarding
- * invalidate, cache disable / bypass, hit/miss statistics; audit B07, W20)
- * are not tested; their observable effects are checked functionally instead
- * (clean keeps lines valid, LRU replacement, eviction write-back).
+ * invalidate, cache disable / bypass; audit B07, W20) are not tested; their
+ * observable effects are checked functionally instead (clean keeps lines
+ * valid, LRU replacement, eviction write-back). Hit / miss statistics come
+ * from the debug event counters (test 37).
  */
 #include "test.h"
 #include "drivers.h"
@@ -253,3 +254,79 @@ static int t_mcachectl(void)
     return TEST_PASS;
 }
 TEST(36, "cache_mcachectl_csr", CAP_CACHE, t_mcachectl);
+
+/* Cache statistics (doc/SPEC.md "Cache maintenance": they come from the debug
+ * event counters, drivers/dbg.c cache_stats()). Exact D-cache counts: after
+ * a flush, one load to each of 32 distinct lines is 32 misses, the same loads
+ * again 32 hits; a store to a resident line is a hit, uncached loads through
+ * the alias count as neither. The measured loops make no other cacheable
+ * data access (cache_stats reads uncached registers). I-cache: an invalidate
+ * is followed by misses, a loop that fits the cache then only hits. */
+#if PLATFORM_HAS_SOC
+#define ST_LINES 32u
+static uint32_t st_buf[ST_LINES * 4] __attribute__((aligned(16)));
+
+/* Counter snapshots go to registers only: drivers/dbg.c's dbg_evcnt_get and
+ * dbg_evcnt_settle are leaf functions without stack accesses, so the
+ * measurement itself adds no cacheable data access. */
+#define SNAP(h, m) do { dbg_evcnt_settle();                         \
+        (h) = dbg_evcnt_get(EVC_DC_HIT); (m) = dbg_evcnt_get(EVC_DC_MISS); } while (0)
+
+static int t_cache_stats(void)
+{
+    volatile uint32_t *p = st_buf, *u = UNCACHED(st_buf);
+    uint32_t h0, m0, h1, m1, sum = 0;
+    CHECK(dbg_present());
+    CHECK(dcache_flush() == 0);
+    SNAP(h0, m0);
+    for (uint32_t i = 0; i < ST_LINES; i++) sum += p[i * 4];          /* 32 cold lines */
+    SNAP(h1, m1);
+    CHECK_EQ(m1 - m0, ST_LINES);
+    CHECK_EQ(h1 - h0, 0);
+    SNAP(h0, m0);
+    for (uint32_t i = 0; i < ST_LINES; i++) sum += p[i * 4 + 1];      /* resident: hits */
+    SNAP(h1, m1);
+    CHECK_EQ(h1 - h0, ST_LINES);
+    CHECK_EQ(m1 - m0, 0);
+    SNAP(h0, m0);
+    for (uint32_t i = 0; i < ST_LINES; i++) p[i * 4 + 2] = i;         /* store hits */
+    SNAP(h1, m1);
+    CHECK_EQ(h1 - h0, ST_LINES);
+    CHECK_EQ(m1 - m0, 0);
+    SNAP(h0, m0);
+    for (uint32_t i = 0; i < ST_LINES; i++) sum += u[i * 4];          /* uncached: neither */
+    SNAP(h1, m1);
+    CHECK_EQ(h1 - h0, 0);
+    CHECK_EQ(m1 - m0, 0);
+    (void)sum;
+    /* I-cache: misses after an invalidate, a resident loop only hits */
+    dbg_evcnt_settle();
+    h0 = dbg_evcnt_get(EVC_IC_HIT); m0 = dbg_evcnt_get(EVC_IC_MISS);
+    icache_invalidate();
+    for (volatile int i = 0; i < 64; i++) { }
+    dbg_evcnt_settle();
+    h1 = dbg_evcnt_get(EVC_IC_HIT); m1 = dbg_evcnt_get(EVC_IC_MISS);
+    CHECK(m1 > m0);
+    h0 = h1; m0 = m1;
+    for (volatile int i = 0; i < 64; i++) { }
+    dbg_evcnt_settle();
+    h1 = dbg_evcnt_get(EVC_IC_HIT); m1 = dbg_evcnt_get(EVC_IC_MISS);
+    CHECK(h1 - h0 > 64u);
+    CHECK(m1 - m0 < 8u);
+    /* the statistics API returns exactly the event counters (held for the read) */
+    cache_stats_t cs;
+    dbg_evcnt_ctrl(1, 0);
+    dbg_evcnt_settle();
+    cache_stats(&cs);
+    CHECK_EQ(cs.dc_hit, dbg_evcnt_get(EVC_DC_HIT));
+    CHECK_EQ(cs.dc_miss, dbg_evcnt_get(EVC_DC_MISS));
+    CHECK_EQ(cs.ic_hit, dbg_evcnt_get(EVC_IC_HIT));
+    CHECK_EQ(cs.ic_miss, dbg_evcnt_get(EVC_IC_MISS));
+    dbg_evcnt_ctrl(0, 0);
+    CHECK(dcache_clean() == 0);
+    return TEST_PASS;
+}
+#else
+static int t_cache_stats(void) { return TEST_SKIP; }      /* CAP_CACHE: never run */
+#endif
+TEST(37, "cache_stats_counters", CAP_CACHE, t_cache_stats);

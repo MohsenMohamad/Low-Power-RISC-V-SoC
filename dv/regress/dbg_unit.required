@@ -1,0 +1,20 @@
+# Debug-block unit testbenches (scripts/run_dbg.py, make dbg-unit): every
+# test at every seed (DBG_SEEDS = 1 2 3); the trace buffer at every supported
+# depth; negative tests of the testbench checkers.
+trace_rand_d16/seed{1..3}
+trace_rand_d32/seed{1..3}
+trace_rand_d64/seed{1..3}
+trace_rand_d128/seed{1..3}
+trace_pwroff_d16/seed{1..3}
+trace_pwroff_d32/seed{1..3}
+trace_pwroff_d64/seed{1..3}
+trace_pwroff_d128/seed{1..3}
+evcnt_rand/seed{1..3}
+evcnt_pwr/seed{1..3}
+errlog_rand/seed{1..3}
+wdt_rand/seed{1..3}
+wdt_lock/seed{1..3}
+subsys_smoke/seed{1..3}
+subsys_wdt_chain/seed{1..3}
+neg/trace_ts_zero
+neg/axil_rst

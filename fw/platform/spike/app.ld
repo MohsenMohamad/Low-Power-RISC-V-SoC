@@ -24,12 +24,15 @@ SECTIONS
     } > RAM
     .tohost : ALIGN(64) { KEEP(*(.tohost)) } > RAM
     .data : {
+        __data_start = .;          /* executed in place: crt0's copy is a no-op */
         *(.data .data.*)
         __global_pointer$ = . + 0x800;
         *(.sdata .sdata.*)
         . = ALIGN(16);
+        __data_end = .;
         __image_end = .;
     } > RAM
+    __data_lma = __data_start;
     __image_size = __image_end - __image_start;
     .bss (NOLOAD) : {
         __bss_start = .;

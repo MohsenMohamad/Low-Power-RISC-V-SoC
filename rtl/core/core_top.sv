@@ -54,6 +54,7 @@ module core_top
   input  logic        wfi_hold_i,        // PMU idle handshake active: stay in WFI
   output logic        core_sleep_o,      // in WFI, pipeline and fetch idle, no wake pending
   output logic        wfi_quiet_o,       // in WFI, pipeline and fetch idle (wake may be pending)
+  output logic        stall_o,           // a valid instruction is held in a stage this cycle
 
   // Commit trace (verification only; unused bits are optimised away)
   output logic        trace_valid_o,
@@ -465,6 +466,13 @@ module core_top
     else if (irq_wake && !wfi_hold_i)        wfi_sleep_q <= 1'b0;
   end
 
+  // Pipeline stall (debug event counter, doc/CPU_SOC_INTERFACE.md): a valid
+  // instruction is held in its stage this cycle - load/CSR-use hazard,
+  // multi-cycle divide, data-memory wait, maintenance / fence.i in WB, or the
+  // drain before an interrupt is taken. Fetch bubbles and WFI sleep are not
+  // stalls.
+  assign stall_o = wb_stall || (mem_valid && mem_stall) || (ex_valid && ex_stall) ||
+                   (f_valid && id_stall && !wfi_sleep_q);
   assign wfi_quiet_o  = wfi_sleep_q && f_idle && !ex_valid && !mem_valid && !wb_valid;
 
   assign core_sleep_o = wfi_sleep_q && !irq_wake && f_idle &&

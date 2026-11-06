@@ -34,6 +34,12 @@ int platform_getc(void)
     return -1;
 }
 
+uint32_t platform_host_arg(unsigned i)
+{
+    (void)i;
+    return 0;
+}
+
 uint32_t platform_boot_arg(void)
 {
 #ifdef SPIKE_TEST

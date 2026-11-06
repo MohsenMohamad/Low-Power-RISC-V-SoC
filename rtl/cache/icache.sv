@@ -47,7 +47,13 @@ module icache #(
   input  logic [1:0]  m_rresp,
   /* verilator lint_on UNUSEDSIGNAL */
 
-  output logic        idle_o
+  output logic        idle_o,
+  // Debug events (doc/CPU_SOC_INTERFACE.md "Debug observability"): one pulse per
+  // cacheable fetch lookup, in the cycle the first tag compare resolves. The
+  // compare after a refill (replay) is not a second lookup. Uncached fetches
+  // count as neither.
+  output logic        ev_hit_o,
+  output logic        ev_miss_o
 );
 
   localparam int WAYS  = 2;
@@ -112,6 +118,16 @@ module icache #(
   assign gnt_o  = !inval_req_i && ((state_q == S_IDLE) || (state_q == S_LOOKUP && hit));
   assign accept = req_i && gnt_o;
   assign idle_o = (state_q == S_IDLE);
+
+  // Debug events: replay_q marks the lookup that follows a refill.
+  logic replay_q;
+  assign ev_hit_o  = (state_q == S_LOOKUP) && hit && !replay_q;
+  assign ev_miss_o = (state_q == S_LOOKUP) && !hit;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)                    replay_q <= 1'b0;
+    else if (state_q == S_REPLAY)  replay_q <= 1'b1;
+    else if (state_q == S_LOOKUP)  replay_q <= 1'b0;
+  end
 
   // Tie off write channels
   assign m_awvalid = 1'b0;

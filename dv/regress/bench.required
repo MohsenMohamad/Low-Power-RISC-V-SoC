@@ -1,0 +1,14 @@
+# Bench flow against the SoC simulation through the UART pty (make bench,
+# tools/bench/testlists/sim_demo.toml): one result per step.
+bench/boot-rom-monitor-and-ids
+bench/load-dbgapp
+bench/target-ids-in-application
+bench/driver-and-wiring-test
+bench/force-sleep
+bench/force-dvfs-op0
+bench/force-deep-sleep-at-op0
+bench/force-dvfs-op2
+bench/force-idle
+bench/stress
+bench/crash-illegal-instruction
+bench/final-debug-dump

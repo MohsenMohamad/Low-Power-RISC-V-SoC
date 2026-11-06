@@ -51,6 +51,7 @@
 #define RST_POR             1u      /* STATUS.RESUME = 0 */
 #define RST_SLEEP           2u      /* RESUME = 1, RESUME_DEEP = 0 */
 #define RST_DEEP            3u      /* RESUME = 1, RESUME_DEEP = 1 */
+#define RST_WDT             4u      /* STATUS.WDT_RST = 1: PD_CPU reset by the watchdog */
 
 /* boot_reason: first resume check that failed (0 = resumed) */
 #define REASON_OK           0u
@@ -91,6 +92,7 @@ typedef struct {
 typedef struct {
     uint32_t magic;                 /* HOSTBOX_MAGIC when valid          */
     uint32_t boot_arg;              /* see platform_api.h BOOTARG_*      */
+    uint32_t arg[3];                /* application arguments (0 if unset) */
 } hostbox_t;
 
 /* Application image header (at APP_BASE). */

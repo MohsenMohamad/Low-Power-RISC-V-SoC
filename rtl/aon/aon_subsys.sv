@@ -10,14 +10,17 @@
 //   0x2000_2000  interrupt controller
 //   0x2000_3000  PMU
 //   0x2000_4000  wake timer
-//   0x2000_8000  debug blocks (32 KB; reserved, not implemented in stage 1 -> SLVERR)
+//   0x2000_8000  debug blocks (dbg_subsys, 16 KB decoded: trace, event counters,
+//                error log, watchdog; 0x2000_C000-0x2000_FFFF of the 32 KB debug
+//                range is unmapped -> SLVERR; doc/DEBUG_SPEC.md)
 //   0x3000_0000  RAM uncached alias 128 KB: same physical RAM as 0x1000_0000.
 //                Not cacheable in the CPU (outside the D-cache window), so
 //                accesses bypass the D-cache. The alias is folded onto the RAM
 //                window before the interconnect decode.
 // Unmapped addresses return SLVERR.
 // Interrupt controller sources:
-//   0 UART, 1 wake timer, 2 PMU (DVFS done), 3 external wake pin, 7:4 spare
+//   0 UART, 1 wake timer, 2 PMU (DVFS done), 3 external wake pin,
+//   4 debug error log, 5 watchdog bark, 7:6 spare
 // -----------------------------------------------------------------------------
 module aon_subsys #(
   parameter ROM_INIT       = "",
@@ -30,7 +33,8 @@ module aon_subsys #(
   parameter logic [31:0] ROM_MASK       = 32'hFFFF_C000,
   parameter logic [31:0] RAM_BASE       = 32'h1000_0000,
   parameter logic [31:0] RAM_MASK       = 32'hFFFE_0000,
-  parameter logic [31:0] RAM_ALIAS_BASE = 32'h3000_0000
+  parameter logic [31:0] RAM_ALIAS_BASE = 32'h3000_0000,
+  parameter int unsigned TRACE_DEPTH    = 64
 ) (
   input  logic        clk_i,
   input  logic        rst_ni,
@@ -79,15 +83,29 @@ module aon_subsys #(
   output logic [1:0]  dvfs_sel_o,
   input  logic [2:0]  dvfs_active_i,
   output logic [1:0]  vsel_o,
-  output logic [4:0]  pmu_state_o
+  output logic [4:0]  pmu_state_o,
+  // debug observability from PD_CPU (clk_cpu, already isolated: 0 while off)
+  input  logic        clk_cpu_i,
+  input  logic        dbg_ret_valid_i,
+  input  logic [31:0] dbg_ret_pc_i,
+  input  logic [31:0] dbg_ret_insn_i,
+  input  logic        dbg_trap_valid_i,
+  input  logic [31:0] dbg_trap_cause_i,
+  input  logic [31:0] dbg_trap_pc_i,
+  input  logic [31:0] dbg_trap_tval_i,
+  input  logic        dbg_ic_hit_i,
+  input  logic        dbg_ic_miss_i,
+  input  logic        dbg_dc_hit_i,
+  input  logic        dbg_dc_miss_i,
+  input  logic        dbg_stall_i
 );
-  localparam int NS = 7;
+  localparam int NS = 8;
   localparam int RAW = 17;
   localparam logic [NS*32-1:0] BASE = {
-    32'h2000_4000, 32'h2000_3000, 32'h2000_2000, 32'h2000_1000,
+    32'h2000_8000, 32'h2000_4000, 32'h2000_3000, 32'h2000_2000, 32'h2000_1000,
     32'h2000_0000, RAM_BASE, ROM_BASE};
   localparam logic [NS*32-1:0] MASK = {
-    32'hFFFF_F000, 32'hFFFF_F000, 32'hFFFF_F000, 32'hFFFF_F000,
+    32'hFFFF_C000, 32'hFFFF_F000, 32'hFFFF_F000, 32'hFFFF_F000, 32'hFFFF_F000,
     32'hFFFF_F000, RAM_MASK, ROM_MASK};
 
   // ---------------- RAM uncached alias ----------------
@@ -102,7 +120,8 @@ module aon_subsys #(
   assign x_araddr = fold_alias(s_araddr_i);
 
   localparam int S_ROM = 0, S_RAM = 1, S_UART = 2, S_MTIMER = 3,
-                 S_INTC = 4, S_PMU = 5, S_WTIMER = 6;
+                 S_INTC = 4, S_PMU = 5, S_WTIMER = 6, S_DBG = 7;
+  localparam int NR = 7;   // slaves behind axil_reg_slave (all but the debug blocks)
 
   // ---------------- interconnect ----------------
   logic [NS-1:0]    m_awvalid, m_awready, m_wvalid, m_wready, m_bvalid, m_bready;
@@ -131,13 +150,13 @@ module aon_subsys #(
   assign unused_prot = ^{m_awprot, m_arprot};
 
   // ---------------- register request ports ----------------
-  logic [NS-1:0]    req, we, ack, err;
-  logic [RAW-1:0]   addr  [NS];
-  logic [31:0]      wdata [NS];
-  logic [3:0]       wstrb [NS];
-  logic [31:0]      rdata [NS];
+  logic [NR-1:0]    req, we, ack, err;
+  logic [RAW-1:0]   addr  [NR];
+  logic [31:0]      wdata [NR];
+  logic [3:0]       wstrb [NR];
+  logic [31:0]      rdata [NR];
 
-  for (genvar i = 0; i < NS; i++) begin : g_slv
+  for (genvar i = 0; i < NR; i++) begin : g_slv
     axil_reg_slave #(.AW(RAW)) u_slv (
       .clk_i, .rst_ni,
       .s_awvalid_i (m_awvalid[i]), .s_awready_o (m_awready[i]), .s_awaddr_i (m_awaddr),
@@ -170,6 +189,8 @@ module aon_subsys #(
 
   // ---------------- peripherals ----------------
   logic       uart_irq, wtimer_irq, pmu_irq, ext_wake_s;
+  logic [1:0] dbg_pstate, dbg_op, dbg_evt_from, dbg_evt_to, dbg_evt_result;
+  logic       dbg_evt_valid, dbg_wdt_rst_req, dbg_wdt_irq, dbg_err_irq;
   logic [7:0] irq_src;
 
   aon_uart u_uart (
@@ -197,7 +218,7 @@ module aon_subsys #(
     .clk_i, .rst_ni, .d_i (ext_wake_i), .q_o (ext_wake_s)
   );
 
-  assign irq_src = {4'b0, ext_wake_s, pmu_irq, wtimer_irq, uart_irq};
+  assign irq_src = {2'b0, dbg_wdt_irq, dbg_err_irq, ext_wake_s, pmu_irq, wtimer_irq, uart_irq};
 
   aon_intc #(.N(8)) u_intc (
     .clk_i, .rst_ni, .src_i (irq_src), .irq_o (meip_o),
@@ -219,9 +240,39 @@ module aon_subsys #(
     .cg_en_o, .cg_ack_i, .bus_idle_i,
     .iso_en_o, .cpu_rst_no, .cpu_rst_ack_i, .pwr_sw_en_o, .pwr_good_i,
     .ram_ret_o (ram_ret),
+    .wdt_rst_req_i (dbg_wdt_rst_req),
     .dvfs_sel_o, .dvfs_active_i, .vsel_o,
-    .irq_o (pmu_irq), .state_o (pmu_state_o)
+    .irq_o (pmu_irq), .state_o (pmu_state_o),
+    .dbg_state_o (dbg_pstate), .dbg_op_o (dbg_op), .dbg_evt_valid_o (dbg_evt_valid),
+    .dbg_evt_from_o (dbg_evt_from), .dbg_evt_to_o (dbg_evt_to), .dbg_evt_result_o (dbg_evt_result)
   );
+
+  // ---------------- debug blocks (doc/DEBUG_SPEC.md) ----------------
+  // AXI4-Lite straight from the interconnect (the blocks have their own
+  // AXI front end); 14-bit local address, addr[13:12] selects the block.
+  dbg_subsys #(.TRACE_DEPTH (TRACE_DEPTH)) u_dbg (
+    .clk_aon_i (clk_i), .rst_aon_ni (rst_ni), .clk_cpu_i,
+    .s_axil_awaddr (m_awaddr[13:0]), .s_axil_awprot (m_awprot), .s_axil_awvalid (m_awvalid[S_DBG]),
+    .s_axil_awready (m_awready[S_DBG]),
+    .s_axil_wdata (m_wdata), .s_axil_wstrb (m_wstrb), .s_axil_wvalid (m_wvalid[S_DBG]),
+    .s_axil_wready (m_wready[S_DBG]),
+    .s_axil_bresp (m_bresp[2*S_DBG +: 2]), .s_axil_bvalid (m_bvalid[S_DBG]), .s_axil_bready (m_bready[S_DBG]),
+    .s_axil_araddr (m_araddr[13:0]), .s_axil_arprot (m_arprot), .s_axil_arvalid (m_arvalid[S_DBG]),
+    .s_axil_arready (m_arready[S_DBG]),
+    .s_axil_rdata (m_rdata[32*S_DBG +: 32]), .s_axil_rresp (m_rresp[2*S_DBG +: 2]),
+    .s_axil_rvalid (m_rvalid[S_DBG]), .s_axil_rready (m_rready[S_DBG]),
+    .ret_valid_i (dbg_ret_valid_i), .ret_pc_i (dbg_ret_pc_i), .ret_insn_i (dbg_ret_insn_i),
+    .trap_valid_i (dbg_trap_valid_i), .trap_cause_i (dbg_trap_cause_i), .trap_pc_i (dbg_trap_pc_i),
+    .trap_tval_i (dbg_trap_tval_i),
+    .ic_hit_i (dbg_ic_hit_i), .ic_miss_i (dbg_ic_miss_i), .dc_hit_i (dbg_dc_hit_i),
+    .dc_miss_i (dbg_dc_miss_i), .stall_i (dbg_stall_i),
+    .pwr_state_i (dbg_pstate), .dvfs_op_i (dbg_op), .pmu_evt_valid_i (dbg_evt_valid),
+    .pmu_evt_from_i (dbg_evt_from), .pmu_evt_to_i (dbg_evt_to), .pmu_evt_result_i (dbg_evt_result),
+    .cpu_rst_req_o (dbg_wdt_rst_req), .wdt_irq_o (dbg_wdt_irq), .err_irq_o (dbg_err_irq)
+  );
+
+  logic unused_dbg;   // the debug blocks decode a 14-bit local address
+  assign unused_dbg = ^{m_awaddr[31:14], m_araddr[31:14]};
 
   logic unused_addr;
   assign unused_addr = ^{addr[S_UART][16:12], addr[S_MTIMER][16:12], addr[S_WTIMER][16:12],

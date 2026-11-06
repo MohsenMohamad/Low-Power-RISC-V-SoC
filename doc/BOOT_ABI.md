@@ -21,10 +21,10 @@ mode in DEEP_SLEEP). Uncached alias: `RAM_BASE + 0x2000_0000` = `0x3000_0000`.
 |---|---|---|---|---|
 | `0x000` | 64 B | handoff block (below) | ROM, application | at power-on |
 | `0x040` | 104 B | saved CPU context `pm_ctx_t` (`CTX_ADDR` = `0x1000_0040`) | application (`pm_suspend`) | magic word at every boot |
-| `0x100` | 8 B | host mailbox: `HARG` magic, boot argument | host / testbench | never |
-| `0x200` | 512 B | persistent area: kept across a resume and across a resume-rejected cold boot; accessed only through the uncached alias | application | at power-on |
+| `0x100` | 20 B | host mailbox: `HARG` magic, boot argument, three application arguments | host / testbench | never |
+| `0x200` | 512 B | persistent area: kept across a resume, a resume-rejected cold boot and a watchdog reset; accessed only through the uncached alias | application | at power-on |
 | `0x400` | 3 KB | boot ROM `.data`, `.bss` and stack (stack top `RAM_BASE + 0x1000`) | ROM | - |
-| `0x1000` | up to 124 KB | application image (header first), then its `.bss`; application stack at the top of RAM | host (image), application | - |
+| `0x1000` | up to 124 KB | application image (header first; never written at run time), then the run-time copy of its `.data`, its `.bss`; application stack at the top of RAM | host (image), application | - |
 
 The boot ROM touches only `0x000`-`0x0FF` (handoff and context),
 `0x200`-`0x3FF` (clear at power-on) and its own `0x400`-`0xFFF`, so a resume
@@ -36,7 +36,7 @@ never changes application memory.
 |---|---|---|
 | `0x00` | `rom_version` | `0x0002_0000` (2.0) |
 | `0x04` | `boot_status` | 1 COLD (power-on, image started), 2 RESUMED, 3 RESUME_BADCTX (woke from SLEEP / DEEP_SLEEP, context rejected, cold boot), 4 NO_IMAGE (ROM monitor) |
-| `0x08` | `rst_cause` | 1 POR (`STATUS.RESUME` = 0), 2 SLEEP (`RESUME` = 1, `RESUME_DEEP` = 0), 3 DEEP (`RESUME_DEEP` = 1) |
+| `0x08` | `rst_cause` | 1 POR (`STATUS.RESUME` = 0), 2 SLEEP (`RESUME` = 1, `RESUME_DEEP` = 0), 3 DEEP (`RESUME_DEEP` = 1), 4 WDT (`STATUS.WDT_RST` = 1: PD_CPU reset by the watchdog, doc/SOC_REGMAP.md "Watchdog reset") |
 | `0x0C` | `boot_reason` | first resume check that failed: 0 none (resumed), 1 no resume flag, 2 SCRATCH1 magic, 3 SCRATCH0 pointer, 4 context magic, 5 context CRC |
 | `0x10` | `pmu_status` | `PMU.STATUS` read at ROM entry |
 | `0x14` | `cold_boots` | cold boots since power-on (including resume-rejected ones) |
@@ -104,8 +104,10 @@ its trap handler, then checks, in this order:
 | 4 | `ctx.magic` = `CTX1` | cold boot (4) |
 | 5 | `ctx.crc` = CRC-32(`ctx.regs`, `ctx.arch`) | cold boot (5) |
 
-In every case it then writes 1 to `STATUS.RESUME` and `STATUS.RESUME_DEEP`
-(W1C) and clears `SCRATCH1`, so a context is restored at most once.
+`STATUS.WDT_RST` = 1 selects `rst_cause` WDT (the PMU clears RESUME on a
+watchdog reset, so check 1 fails). In every case the ROM then writes 1 to
+`STATUS.RESUME`, `STATUS.RESUME_DEEP` and `STATUS.WDT_RST` (W1C) and clears
+`SCRATCH1`, so a context is restored at most once.
 
 - **Resume** (all checks pass): record `rst_cause`, `boot_reason` = 0,
   `pmu_status`, `boot_status` = RESUMED, `resumes + 1`; clear `ctx.magic`;
@@ -113,13 +115,20 @@ In every case it then writes 1 to `STATUS.RESUME` and `STATUS.RESUME_DEEP`
   `pm_suspend()`, which returns `PM_RESUMED`. The ROM prints nothing.
 - **Cold boot**: at power-on (`rst_cause` POR) clear the handoff block and the
   persistent area (RAM content is undefined at power-on); after a rejected
-  resume keep both and count `bad_resumes`. Record the handoff fields, clear
+  resume keep both and count `bad_resumes`; after a watchdog reset keep both
+  (`boot_status` COLD, `rst_cause` WDT: the debug application's post-mortem
+  reads the error log and its mailbox in the persistent area). Record the handoff fields, clear
   `ctx.magic`, print the banner on the UART, then check the image (below). A
   valid image: D-cache clean (with the error check), I-cache invalidate, jump to
   `entry`. Otherwise (or on a write-back error) `boot_status` = NO_IMAGE and
   the ROM starts the UART monitor (`help peek poke regs go`).
 
 ## Application image
+
+The image is read-only at run time: `app/crt0.S` copies `.data` from the
+image (its load address, `__data_lma`) to its run-time address after the
+image (`fw/platform/lpsoc/app.ld`), then clears `.bss`. So a cold boot without
+a host reload (watchdog reset) finds the image unchanged and its CRC valid.
 
 At `APP_BASE` = `RAM_BASE + 0x1000`, loaded by the host (the testbench
 preloads it into the RAM model). 32-byte header, little-endian words:
@@ -145,7 +154,10 @@ The host (in simulation the testbench, `+bootarg=<hex>`) may write
 argument before the CPU starts. The application reads it through the uncached
 alias. Boot argument: bit 31 run non-interactively, bit 30 start the monitor,
 bits 15:0 test ID (`0xFFFF` = all). Without a valid mailbox the validation
-application starts the UART monitor.
+application starts the UART monitor. `RAM_BASE + 0x108`, `0x10C`, `0x110`
+hold three application arguments (testbench `+hostarg0=` .. `+hostarg2=`,
+0 when not given); the debug application uses them as seed, iteration count
+and flags (doc/DEBUG_SPEC.md section 9).
 
 End of a run: the application prints a last UART line `PASS` (exit code 0)
 or `FAIL 0x<code>`, stores the code in `handoff.signature` and stops in WFI

@@ -25,7 +25,7 @@
 #include "monitor.h"
 #include "platform_api.h"
 
-static const char *const cause_str[] = {"?", "POR", "SLEEP-WAKE", "DEEP-WAKE"};
+static const char *const cause_str[] = {"?", "POR", "SLEEP-WAKE", "DEEP-WAKE", "WATCHDOG"};
 static const char *const reason_str[] = {"ok", "power-on", "bad resume magic", "bad context pointer",
                                          "bad context magic", "bad context CRC"};
 
@@ -57,9 +57,10 @@ void rom_main(void)
     arch_init();
 
     uint32_t st     = pmu_status();
-    uint32_t rc     = !(st & PMU_ST_RESUME) ? RST_POR : (st & PMU_ST_RESUME_DEEP) ? RST_DEEP : RST_SLEEP;
+    uint32_t rc     = (st & PMU_ST_WDT_RST) ? RST_WDT :
+                      !(st & PMU_ST_RESUME) ? RST_POR : (st & PMU_ST_RESUME_DEEP) ? RST_DEEP : RST_SLEEP;
     uint32_t reason = resume_check(st, ctx);
-    pmu_clear_status(PMU_ST_RESUME | PMU_ST_RESUME_DEEP);
+    pmu_clear_status(PMU_ST_RESUME | PMU_ST_RESUME_DEEP | PMU_ST_WDT_RST);
     pmu_write(PMU_SCRATCH1, 0);
 
     if (reason == REASON_OK) {
@@ -79,6 +80,10 @@ void rom_main(void)
         volatile uint32_t *p = (volatile uint32_t *)(PERSIST_ADDR + RAM_UNCACHED_OFFSET);
         for (unsigned i = 0; i < PERSIST_SIZE / 4; i++) p[i] = 0;
         ho->boot_status = BOOT_COLD;
+    } else if (rc == RST_WDT) {
+        /* watchdog reset of PD_CPU (doc/SOC_REGMAP.md): RAM, the handoff block
+         * and the persistent area are kept for the post-mortem */
+        ho->boot_status = BOOT_COLD;
     } else {
         ho->bad_resumes = ho->bad_resumes + 1;
         ho->boot_status = BOOT_RESUME_BADCTX;
@@ -93,7 +98,8 @@ void rom_main(void)
     platform_init();
     printf_("\n[ROM] LPSOC boot ROM %u.%u, reset cause %s%s%s\n",
             (unsigned)(ROM_VERSION >> 16), (unsigned)(ROM_VERSION & 0xFFFF), cause_str[rc],
-            rc != RST_POR ? ", resume rejected: " : "", rc != RST_POR ? reason_str[reason] : "");
+            (rc != RST_POR && rc != RST_WDT) ? ", resume rejected: " : "",
+            (rc != RST_POR && rc != RST_WDT) ? reason_str[reason] : "");
 
     const image_hdr_t *img = (const image_hdr_t *)APP_BASE;
     if (image_valid(img)) {

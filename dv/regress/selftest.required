@@ -29,6 +29,10 @@ selftest/tb_pmu/vsel-mutant
 selftest/formal_pmu/vsel-mutant
 selftest/tb_pmu/wake-mask-mutant
 selftest/formal_pmu/wake-mask-mutant
+selftest/tb_pmu/wdt-bus-mutant
+selftest/formal_pmu/wdt-bus-mutant
+selftest/tb_pmu/wdt-resume-mutant
+selftest/formal_pmu/wdt-resume-mutant
 selftest/run_cosim/exit0-without-pass
 selftest/run_cosim/pass-with-nonzero-exit
 # firmware flow (stage 2): result converter + checker, image builder, monitor checker
@@ -54,3 +58,13 @@ selftest/mkimage/size-not-word-multiple
 selftest/monitor_check/good
 selftest/monitor_check/missing-and-denied
 selftest/monitor_check/session-ended-early
+selftest/bench/ids-positive-control
+selftest/bench/pmu-id-zero
+selftest/bench/peek-wrong-address
+selftest/bench/power-positive-control
+selftest/bench/power-aborted
+selftest/bench/power-counters-not-skipped
+selftest/dbg_decode/divergence-positive-control
+selftest/dbg_decode/bad-first-retirement
+selftest/dbg_decode/bad-first-instruction
+selftest/dbg_decode/bad-crc

@@ -60,6 +60,7 @@ is only used behind a synchronizer.
 | `mtime_ack_i` | in | 1 | async (clk_aon) | Snapshot acknowledge toggle |
 | `mtime_req_o` | out | 1 | clk_cpu, flop output | Snapshot request toggle |
 | `m_aw*` / `m_w*` / `m_b*` / `m_ar*` / `m_r*` | | | clk_cpu | AXI4-Lite master (below) |
+| `dbg_*` | out | 167 | clk_cpu, flop outputs | Debug observability (see "Debug observability") |
 
 AXI4-Lite master: `m_awvalid_o`, `m_awready_i`, `m_awaddr_o[31:0]`,
 `m_awprot_o[2:0]`, `m_wvalid_o`, `m_wready_i`, `m_wdata_o[31:0]`,
@@ -71,11 +72,46 @@ and one write in flight. `AxPROT` = 001 (data), 101 (instruction). A response
 with `xRESP[1] = 1` (SLVERR, DECERR) is an error: a load / store access fault
 for uncached and refill accesses, an imprecise write-back error otherwise.
 
-Every output is isolated in PD_AON (`u_iso`, clamp value 0) while
-`iso_en` is high. Inputs need no isolation. No output of PD_CPU is used in
+Every output, including the `dbg_*` observability outputs, is isolated in
+PD_AON (`u_iso`, clamp value 0) while `iso_en` is high. Inputs need no isolation. No output of PD_CPU is used in
 PD_AON without first passing either the isolation cell and a synchronizer
 (`idle_ack`, `core_sleep`, `cache_clean`, `mtime_req`) or the isolation cell
 and the AXI CDC bridge.
+
+## Debug observability (audit W21, B15)
+
+Outputs of `cpu_top`, passed through `pd_cpu` unchanged, isolated in
+`soc_top.u_iso` and consumed by the debug blocks in PD_AON
+(`aon_subsys.u_dbg`, doc/DEBUG_SPEC.md section 4). All are flop outputs
+(registered in `cpu_top`), so each event appears one `clk_cpu` cycle after it
+happened in the core; the debug blocks' capture front ends run on the same
+`clk_cpu` and cross to `clk_aon` internally (doc/DEBUG_SPEC.md 1.1). While
+PD_CPU is isolated they read 0 and no event is counted or traced.
+
+| Port | Width | Meaning |
+|---|---|---|
+| `dbg_ret_valid_o` | 1 | One instruction retired: committed in WB and did not trap (`trace_valid_o && !trace_trap_o && !trace_irq_o`) |
+| `dbg_ret_pc_o` | 32 | PC of the retired instruction |
+| `dbg_ret_insn_o` | 32 | Its instruction word (no compressed instructions) |
+| `dbg_trap_valid_o` | 1 | A trap was taken: an exception (`trace_trap_o`, the instruction did not retire) or an interrupt entry (`trace_irq_o`) |
+| `dbg_trap_cause_o` | 32 | `mcause` written by the trap: bit 31 = interrupt, bits 4:0 the cause code, bits 30:5 zero |
+| `dbg_trap_pc_o` | 32 | `mepc` written by the trap (the trapping instruction, or the next instruction for an interrupt) |
+| `dbg_trap_tval_o` | 32 | `mtval` written by the trap (0 for interrupts) |
+| `dbg_ic_hit_o` / `dbg_ic_miss_o` | 1 / 1 | I-cache: one pulse per cacheable fetch lookup, hit or miss, in the cycle the first tag compare resolves; the compare after a refill is not counted again; uncached fetches count as neither |
+| `dbg_dc_hit_o` / `dbg_dc_miss_o` | 1 / 1 | D-cache: the same for cacheable loads and stores; uncached accesses (including the RAM alias) and `mcachectl` maintenance count as neither |
+| `dbg_stall_o` | 1 | Pipeline stall: a valid instruction is held in its stage this cycle (load/CSR-use hazard, multi-cycle divide, data-memory wait, `mcachectl` / `fence.i` in WB, drain before an interrupt). Fetch bubbles (I-cache misses with an empty pipeline) and WFI sleep are not stalls |
+
+Contract (SVA in `cpu_top`): retire and trap are never high in the same
+cycle (`a_dbg_ret_trap_excl`: an interrupt is taken only with the pipeline
+drained, an exception replaces the retire of its instruction), no retire
+follows a trap in the next cycle (`a_dbg_no_ret_after_trap`: the trap flushes
+the pipeline), hit and miss are exclusive (`a_dbg_ic_excl`, `a_dbg_dc_excl`).
+The commit trace `trace_*` stays the co-simulation port; the conversion above
+is the difference between the two (W21: on the commit trace a trapped
+instruction and an interrupt entry also raise `trace_valid_o`, and the cause
+is 5 bits plus a separate interrupt flag). The cache benches check the
+hit / miss pulses against their reference models (one pulse per first
+lookup, totals equal to the model's lookups and hits; `make cachetest`).
 
 ## Clock-domain crossings at the boundary
 
@@ -87,6 +123,7 @@ and the AXI CDC bridge.
 | `mtime[63:0]` | AON -> CPU | snapshot handshake (below) | Data never passes a synchronizer; it is stable when sampled |
 | `mtime_req` / `mtime_ack` | both | 2 flops each side | Toggle signals |
 | AXI4-Lite | CPU -> AON | `axil_cdc_bridge`, one Gray-pointer async FIFO per channel | |
+| `dbg_*` | CPU -> AON | inside the debug blocks (`clk_cpu` capture front end, then Gray counters / toggle handshakes / two-clock RAM, doc/DEBUG_SPEC.md 1.1) | the front-end flops are in PD_AON on `clk_cpu`; the isolated inputs are synchronous to it |
 | `cg_en` / `cg_ack`, CPU reset / `cpu_rst_ack` | AON <-> clk_cpu_root | `cpu_clk_rst_ctrl` | see Reset and clock ownership |
 
 ## Power handshake (doc/SPEC.md)

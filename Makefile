@@ -6,7 +6,8 @@
 #
 # Individual steps (each exits nonzero on failure):
 #   make toolchain   verify pinned tool versions (scripts/setup_toolchain.sh --check)
-#   make lint        Verilator -Wall: SoC (with and without SVA) and the CPU subsystem
+#   make lint        Verilator -Wall: SoC (with and without SVA), the CPU subsystem, and the
+#                    debug blocks at every trace depth
 #   make fw          firmware (GCC 13.2), one tree (fw/): lpsoc boot ROM + applications
 #                    (suite, pm_test, boot_test, neg_fail), Spike validation suite
 #   make sim         SoC, Verilator, pm_test, random OFF-state corruption + coverage goals
@@ -19,9 +20,17 @@
 #   make fw-spike    firmware validation suite on Spike (--priv=M and --priv=MSU)
 #   make fw-monitor  scripted UART monitor sessions on the SoC (application, boot ROM)
 #   make fw-neg      firmware-flow negative tests (failing test, aborted IDLE, bad images)
+#   make bench       lab bench flow (tools/bench) against the SoC simulation through the
+#                    UART pseudo-terminal: firmware load via the monitor, forced power /
+#                    DVFS transitions, debug tests, crash capture
+#   make dbg-integ   debug application on the SoC: driver / wiring test, seeded stress,
+#                    expected crashes, watchdog hang, Spike divergence, fault injection
+#                    + triage (crash dumps judged by tools/dbg_decode.py)
 #   make cosim       CPU: directed + random programs in lockstep with Spike
 #   make archtest    CPU: riscv-arch-test 3.9.1 (rv32i_m I, M, Zifencei, privilege)
 #   make cachetest   caches / AXI mux: SystemVerilog constrained-random unit benches
+#   make dbg-unit    debug blocks: SystemVerilog unit benches (trace at every depth),
+#                    checker negative tests
 #   make coverage    CPU coverage merge; fails on unwaived holes (dv/coverage_waivers.txt)
 #   make formal      SymbiYosys proofs, each with a cover run
 #   make mutation    mutation analysis; fails on surviving / unbuildable mutants
@@ -48,6 +57,10 @@ CACHE_SEEDS  ?= 1 2 3 4 5 6 7 8
 CACHE_N      ?= 8000
 MUT_SEEDS    ?= 24
 PMU_EPISODES ?= 400
+DBG_SEEDS    ?= 1 2 3
+DBG_STRESS_SEEDS ?= 1 2 3 4
+DBG_INJECT_SEEDS ?= 4 6 20
+DBG_ITERS    ?= 24
 
 BUILD := build
 
@@ -74,9 +87,9 @@ CHECK   := $(PYTHON) scripts/check_results.py
 
 COSIM_BIN := $(BUILD)/cosim/obj/Vcosim
 
-.PHONY: test toolchain lint lint-soc lint-cpu fw corrupt sim sim-x boot boot-x sim-neg sim-pmu \
-        fw-suite fw-spike fw-monitor fw-neg \
-        cosim cosim-build archtest cachetest coverage formal mutation selftest clean
+.PHONY: test toolchain lint lint-soc lint-cpu lint-debug fw corrupt sim sim-x boot boot-x sim-neg sim-pmu \
+        fw-suite fw-spike fw-monitor fw-neg dbg-integ bench bench-sim \
+        cosim cosim-build archtest cachetest dbg-unit coverage formal mutation selftest clean
 
 test:
 	$(PYTHON) scripts/regress.py
@@ -85,12 +98,22 @@ toolchain:
 	scripts/setup_toolchain.sh --check
 
 # ------------------------------------------------------------------ lint
-lint: lint-soc lint-cpu
+lint: lint-soc lint-cpu lint-debug
 
 lint-soc:
 	$(VERILATOR) --lint-only -Wall --top-module soc_top $(VLT_CFG) -f rtl/files.f
 	$(VERILATOR) --lint-only -Wall -DSVA_ON --assert --top-module soc_top $(VLT_CFG) $(VLT_SVA) -f rtl/files.f
 	@echo "== SoC lint clean =="
+
+# Debug blocks standalone at every supported trace depth (the SoC lint covers
+# the depth soc_top uses).
+DBG_SRCS := rtl/tech/tech_sync.sv rtl/tech/tech_ram_2c.sv rtl/common/rst_sync.sv \
+            $(filter rtl/debug/%,$(RTL_FILES))
+TRACE_DEPTHS := 16 32 64 128
+lint-debug:
+	@set -e; for d in $(TRACE_DEPTHS); do \
+	  $(VERILATOR) --lint-only -Wall --top-module dbg_subsys -GTRACE_DEPTH=$$d $(VLT_CFG) $(DBG_SRCS); done
+	@echo "== debug lint clean (trace depths $(TRACE_DEPTHS)) =="
 
 lint-cpu:
 	$(VERILATOR) --lint-only -Wall -Irtl/include --top-module cpu_top $(CPU_SRCS)
@@ -176,6 +199,29 @@ fw-neg: $(VL_TB) $(FW_STAMP)
 	$(CHECK) --name fw-neg --results $(BUILD)/fw-neg/results.json --required dv/regress/fw_neg.required \
 	  && exit $$rc
 
+dbg-integ: $(VL_TB) $(FW_STAMP)
+	$(FW_RUN) dbg --spike $(SPIKE_PREFIX)/bin/spike --rv-prefix $(RV_PREFIX) --jobs $(JOBS) \
+	  --dbg-seeds "$(DBG_STRESS_SEEDS)" --dbg-inject-seeds "$(DBG_INJECT_SEEDS)" --dbg-iters $(DBG_ITERS) \
+	  --out $(BUILD)/dbg-integ; rc=$$?; \
+	$(CHECK) --name dbg-integ --results $(BUILD)/dbg-integ/results.json --required dv/regress/dbg_integ.required \
+	  && exit $$rc
+
+# Bench build of the SoC simulation: the same bench with the UART pty bridge.
+VL_BENCH := $(BUILD)/sim/vl_bench/Vtb_soc
+PTY_SRCS := verif/debug/integ/dbg_uart_pty_bridge.sv verif/debug/integ/uart_pty.c
+bench-sim: $(VL_BENCH)
+$(VL_BENCH): $(RTL_FILES) sim/tb_soc.sv $(CORRUPT) $(PTY_SRCS)
+	@mkdir -p $(BUILD)/sim/vl_bench
+	$(VERILATOR) $(VL_SIM_FLAGS) -DBENCH_PTY --top-module tb_soc -Mdir $(BUILD)/sim/vl_bench -o Vtb_soc \
+	  -I$(BUILD)/corrupt $(VLT_CFG) -f rtl/files.f $(PTY_SRCS) sim/tb_soc.sv > $(BUILD)/sim/vl_bench_build.log 2>&1 \
+	  || (tail -30 $(BUILD)/sim/vl_bench_build.log; exit 1)
+
+bench: $(VL_BENCH) $(FW_STAMP)
+	rm -rf $(BUILD)/bench
+	$(PYTHON) tools/bench/sequencer.py tools/bench/testlists/sim_demo.toml --board sim --out $(BUILD)/bench; rc=$$?; \
+	$(CHECK) --name bench --results $(BUILD)/bench/results_check.json --required dv/regress/bench.required \
+	  && exit $$rc
+
 # ------------------------------------------------------------------ PMU unit test
 $(BUILD)/sim/pmu/Vtb_pmu: rtl/aon/pmu.sv rtl/include/sva_macros.svh sim/pmu/tb_pmu.sv
 	@mkdir -p $(BUILD)/sim/pmu
@@ -221,6 +267,16 @@ cachetest:
 	rm -rf $(BUILD)/cachetest/dcache $(BUILD)/cachetest/icache $(BUILD)/cachetest/axilmux
 	$(MAKE) -C dv/cache VERILATOR=$(VERILATOR) BUILD=$(CURDIR)/$(BUILD)/cachetest SEEDS="$(CACHE_SEEDS)" N=$(CACHE_N); rc=$$?; \
 	$(CHECK) --name cachetest --results $(BUILD)/cachetest/results.json --required dv/regress/cachetest.required \
+	  && exit $$rc
+
+# ------------------------------------------------------------------ debug blocks: unit benches
+dbg-unit:
+	$(MAKE) -C verif/debug VERILATOR=$(VERILATOR) BUILD=$(CURDIR)/$(BUILD)/dbg_unit build
+	rm -rf $(BUILD)/dbg_unit/runs
+	$(PYTHON) scripts/run_dbg.py --build $(BUILD)/dbg_unit --out $(BUILD)/dbg_unit/runs \
+	  --seeds "$(DBG_SEEDS)" --jobs $(JOBS); rc=$$?; \
+	$(PYTHON) tools/cov_merge.py --out $(BUILD)/dbg_unit/cov $(BUILD)/dbg_unit/runs | sed -n '1,/^Cover properties/p;/MISSED/p'; \
+	$(CHECK) --name dbg-unit --results $(BUILD)/dbg_unit/runs/results.json --required dv/regress/dbg_unit.required \
 	  && exit $$rc
 
 coverage:

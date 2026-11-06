@@ -68,7 +68,22 @@ module cpu_top #(
   output logic [31:0] trace_mem_addr_o,
   output logic [31:0] trace_mem_wdata_o,
   output logic [3:0]  trace_mem_be_o,
-  output logic [2:0]  trace_mip_o
+  output logic [2:0]  trace_mip_o,
+
+  // Debug observability (doc/CPU_SOC_INTERFACE.md "Debug observability",
+  // doc/DEBUG_SPEC.md section 4). Flop outputs, one clk cycle after the event.
+  output logic        dbg_ret_valid_o,   // one instruction retired (not trapped)
+  output logic [31:0] dbg_ret_pc_o,
+  output logic [31:0] dbg_ret_insn_o,
+  output logic        dbg_trap_valid_o,  // a trap was taken (exception or interrupt)
+  output logic [31:0] dbg_trap_cause_o,  // mcause written by the trap (bit 31 = interrupt)
+  output logic [31:0] dbg_trap_pc_o,     // mepc written by the trap
+  output logic [31:0] dbg_trap_tval_o,   // mtval written by the trap
+  output logic        dbg_ic_hit_o,
+  output logic        dbg_ic_miss_o,
+  output logic        dbg_dc_hit_o,
+  output logic        dbg_dc_miss_o,
+  output logic        dbg_stall_o
 );
 
   // Core <-> caches
@@ -82,6 +97,7 @@ module cpu_top #(
   logic        ic_idle, dc_idle, dc_clean;
   logic        core_sleep, wfi_quiet, wfi_hold;
   logic        idle_ack_q, core_sleep_q, mux_idle;
+  logic        ic_ev_hit, ic_ev_miss, dc_ev_hit, dc_ev_miss, core_stall;
 
   // Cache AXI ports, [0] = I-cache, [1] = D-cache
   logic [1:0]       c_awvalid, c_awready, c_wvalid, c_wready, c_bvalid, c_bready;
@@ -102,7 +118,7 @@ module cpu_top #(
     .dc_maint_done_i (dc_maint_done), .dc_wb_err_i (dc_wb_err),
     .ic_inval_req_o (ic_inval_req), .ic_inval_done_i (ic_inval_done),
     .irq_software_i, .irq_timer_i, .irq_external_i, .mtime_i,
-    .wfi_hold_i (wfi_hold), .core_sleep_o (core_sleep), .wfi_quiet_o (wfi_quiet),
+    .wfi_hold_i (wfi_hold), .core_sleep_o (core_sleep), .wfi_quiet_o (wfi_quiet), .stall_o (core_stall),
     .trace_valid_o, .trace_irq_o, .trace_trap_o, .trace_pc_o, .trace_insn_o,
     .trace_next_pc_o, .trace_cause_o, .trace_tval_o, .trace_rd_we_o, .trace_rd_o,
     .trace_rd_wdata_o, .trace_mem_we_o, .trace_mem_re_o, .trace_mem_addr_o,
@@ -122,7 +138,7 @@ module cpu_top #(
     .m_bvalid  (c_bvalid[0]),  .m_bready  (c_bready[0]),  .m_bresp  (c_bresp[0]),
     .m_arvalid (c_arvalid[0]), .m_arready (c_arready[0]), .m_araddr (c_araddr[0]), .m_arprot (c_arprot[0]),
     .m_rvalid  (c_rvalid[0]),  .m_rready  (c_rready[0]),  .m_rdata  (c_rdata[0]),  .m_rresp  (c_rresp[0]),
-    .idle_o (ic_idle)
+    .idle_o (ic_idle), .ev_hit_o (ic_ev_hit), .ev_miss_o (ic_ev_miss)
   );
 
   dcache #(
@@ -138,7 +154,7 @@ module cpu_top #(
     .m_bvalid  (c_bvalid[1]),  .m_bready  (c_bready[1]),  .m_bresp  (c_bresp[1]),
     .m_arvalid (c_arvalid[1]), .m_arready (c_arready[1]), .m_araddr (c_araddr[1]), .m_arprot (c_arprot[1]),
     .m_rvalid  (c_rvalid[1]),  .m_rready  (c_rready[1]),  .m_rdata  (c_rdata[1]),  .m_rresp  (c_rresp[1]),
-    .idle_o (dc_idle)
+    .idle_o (dc_idle), .ev_hit_o (dc_ev_hit), .ev_miss_o (dc_ev_miss)
   );
 
   axil_mux2 u_mux (
@@ -183,8 +199,55 @@ module cpu_top #(
   assign core_sleep_o  = core_sleep_q;
   assign cache_clean_o = dc_clean;
 
+  // ---------------------------------------------------------------------------
+  // Debug observability (audit W21, B15). The commit trace above is a
+  // verification port: trace_valid_o is also high for a trapped instruction
+  // and for an interrupt entry, and the cause is 5 bits plus a separate
+  // interrupt flag. The debug port converts it to the retire / trap contract
+  // of doc/DEBUG_SPEC.md: a retire is a committed instruction that did not
+  // trap; a trap is an exception (trace_trap_o) or an interrupt entry
+  // (trace_irq_o) with the full 32-bit mcause. The core takes exceptions and
+  // interrupts in different cycles (an interrupt only with the pipeline
+  // drained), so retire and trap are never high together, and no retire can
+  // follow a trap in the next cycle (the trap flushes the pipeline).
+  // ---------------------------------------------------------------------------
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      dbg_ret_valid_o  <= 1'b0;
+      dbg_ret_pc_o     <= '0;
+      dbg_ret_insn_o   <= '0;
+      dbg_trap_valid_o <= 1'b0;
+      dbg_trap_cause_o <= '0;
+      dbg_trap_pc_o    <= '0;
+      dbg_trap_tval_o  <= '0;
+      dbg_ic_hit_o     <= 1'b0;
+      dbg_ic_miss_o    <= 1'b0;
+      dbg_dc_hit_o     <= 1'b0;
+      dbg_dc_miss_o    <= 1'b0;
+      dbg_stall_o      <= 1'b0;
+    end else begin
+      dbg_ret_valid_o  <= trace_valid_o && !trace_trap_o && !trace_irq_o;
+      dbg_ret_pc_o     <= trace_pc_o;
+      dbg_ret_insn_o   <= trace_insn_o;
+      dbg_trap_valid_o <= trace_trap_o || trace_irq_o;
+      dbg_trap_cause_o <= {trace_irq_o, 26'd0, trace_cause_o};
+      dbg_trap_pc_o    <= trace_pc_o;
+      dbg_trap_tval_o  <= trace_tval_o;
+      dbg_ic_hit_o     <= ic_ev_hit;
+      dbg_ic_miss_o    <= ic_ev_miss;
+      dbg_dc_hit_o     <= dc_ev_hit;
+      dbg_dc_miss_o    <= dc_ev_miss;
+      dbg_stall_o      <= core_stall;
+    end
+  end
+
   // An acknowledged core stays in WFI with no bus activity (SVA_ON builds).
   `SVA_ASSERT_IMP(a_ack_quiescent, clk, rst_n, idle_ack_q,
                   quiescent && !m_arvalid && !m_awvalid && !m_wvalid)
 
+  // Debug port contract (doc/DEBUG_SPEC.md 4.2).
+  `SVA_ASSERT(a_dbg_ret_trap_excl, clk, rst_n, !(dbg_ret_valid_o && dbg_trap_valid_o))
+  `SVA_ASSERT_NXT(a_dbg_no_ret_after_trap, clk, rst_n, dbg_trap_valid_o, !dbg_ret_valid_o)
+  `SVA_ASSERT(a_dbg_ic_excl, clk, rst_n, !(dbg_ic_hit_o && dbg_ic_miss_o))
+  `SVA_ASSERT(a_dbg_dc_excl, clk, rst_n, !(dbg_dc_hit_o && dbg_dc_miss_o))
 endmodule

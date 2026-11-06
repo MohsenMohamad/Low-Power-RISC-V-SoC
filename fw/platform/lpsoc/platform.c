@@ -36,6 +36,13 @@ uint32_t platform_boot_arg(void)
     return hb->boot_arg;
 }
 
+uint32_t platform_host_arg(unsigned i)
+{
+    volatile hostbox_t *hb = (volatile hostbox_t *)(HOSTBOX_ADDR + RAM_UNCACHED_OFFSET);
+    if (hb->magic != HOSTBOX_MAGIC || i >= 3) return 0;
+    return hb->arg[i];
+}
+
 void platform_exit(uint32_t code)
 {
     HANDOFF->signature = code;

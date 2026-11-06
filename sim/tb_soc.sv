@@ -30,7 +30,7 @@
 // * A requested power-down that the PMU refused (dirty D-cache) or that was
 //   aborted before the clock gate is reported as ABORTED; it is never counted
 //   as a completed transition, as coverage, or in the latency statistics.
-// Plusargs: +rom=<hex> +ram=<hex> +bootarg=<hex> +cov=<file> +vcd +timeout=<ns>
+// Plusargs: +rom=<hex> +ram=<hex> +bootarg=<hex> +hostarg0..2=<hex> +cov=<file> +vcd +timeout=<ns>
 //           +uart_in=<file> +uart_log=<file> +wake_delay=<n>
 //           +break_iso (negative test: defeat isolation)
 //           +neg_short_rst (negative test: too short PD_CPU reset pulse)
@@ -64,6 +64,18 @@ module tb_soc #(
   wire  [2:0] clk_op  = {clk_op2, clk_op1, clk_op0};
   logic       por_n   = 1'b0;
   logic       uart_rx = 1'b1;
+  logic       uart_rx_pin;
+`ifdef BENCH_PTY
+  // Lab bench build (make bench-sim): the UART is also connected to a host
+  // pseudo-terminal (verif/debug/integ/dbg_uart_pty_bridge.sv, +pty), so
+  // tools/bench drives the simulated SoC like a board's serial port. Both RX
+  // sources idle high; only one is used in a run.
+  logic       pty_rxd;
+  dbg_uart_pty_bridge #(.DIV(8)) u_pty (.clk(clk_aon), .uart_txd(uart_tx), .uart_rxd(pty_rxd));
+  assign uart_rx_pin = uart_rx & pty_rxd;
+`else
+  assign uart_rx_pin = uart_rx;
+`endif
   logic       uart_tx;
   logic       ext_wake = 1'b0;
   logic [1:0] vsel;
@@ -81,7 +93,7 @@ module tb_soc #(
     .ROM_INIT (ROM_INIT)
   ) dut (
     .clk_aon_i (clk_aon), .clk_op_i (clk_op), .por_ni (por_n), .test_en_i (1'b0),
-    .uart_rx_i (uart_rx), .uart_tx_o (uart_tx), .ext_wake_i (ext_wake), .vsel_o (vsel)
+    .uart_rx_i (uart_rx_pin), .uart_tx_o (uart_tx), .ext_wake_i (ext_wake), .vsel_o (vsel)
   );
 
   // ---------------- boot ROM image ----------------
@@ -122,9 +134,17 @@ module tb_soc #(
       $display("[tb] RAM image: %s", ram);
     end
     if ($value$plusargs("bootarg=%h", barg)) begin
+      logic [31:0] ha0, ha1, ha2;
       dut.u_aon.u_ram.g_ram.u_ram.mem[32'h100 / 4] = 32'h4841_5247;   // "HARG"
       dut.u_aon.u_ram.g_ram.u_ram.mem[32'h104 / 4] = barg;
-      $display("[tb] boot argument 0x%08h", barg);
+      // application arguments (doc/BOOT_ABI.md): +hostarg0..2=<hex>, default 0
+      if (!$value$plusargs("hostarg0=%h", ha0)) ha0 = 0;
+      if (!$value$plusargs("hostarg1=%h", ha1)) ha1 = 0;
+      if (!$value$plusargs("hostarg2=%h", ha2)) ha2 = 0;
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h108 / 4] = ha0;
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h10C / 4] = ha1;
+      dut.u_aon.u_ram.g_ram.u_ram.mem[32'h110 / 4] = ha2;
+      $display("[tb] boot argument 0x%08h, host arguments 0x%08h 0x%08h 0x%08h", barg, ha0, ha1, ha2);
     end
   end
 
@@ -359,7 +379,10 @@ module tb_soc #(
   // ---------------- power-state transition coverage ----------------
   // PMU FSM arcs (from -> to); must match rtl/aon/pmu.sv. Written with
   // functions/case (not array constants) so Icarus Verilog accepts it too.
-  localparam int NARC = 24;
+  // Arcs 0..23: power management; 24..29: watchdog reset (reported as the
+  // separate group "wdt_arc", doc/SOC_REGMAP.md "Watchdog reset").
+  localparam int NARC = 30;
+  localparam int NARC_PM = 24;
   function automatic logic [9:0] arc(input int a);
     case (a)
       0: arc = {5'd0, 5'd1};    1: arc = {5'd1, 5'd2};    2: arc = {5'd1, 5'd18};
@@ -370,6 +393,8 @@ module tb_soc #(
      15: arc = {5'd10, 5'd12}; 16: arc = {5'd11, 5'd12}; 17: arc = {5'd12, 5'd13};
      18: arc = {5'd13, 5'd14}; 19: arc = {5'd14, 5'd15}; 20: arc = {5'd15, 5'd16};
      21: arc = {5'd16, 5'd17}; 22: arc = {5'd17, 5'd18}; 23: arc = {5'd18, 5'd0};
+     24: arc = {5'd0, 5'd19};  25: arc = {5'd19, 5'd20}; 26: arc = {5'd20, 5'd8};
+     27: arc = {5'd20, 5'd17}; 28: arc = {5'd3, 5'd8};   29: arc = {5'd8, 5'd12};
       default: arc = '1;
     endcase
   endfunction
@@ -381,7 +406,7 @@ module tb_soc #(
       9: stn = "PWR_OFF";     10: stn = "OFF";         11: stn = "RET_EXIT";
      12: stn = "PWR_ON";      13: stn = "RST_CLK_ON";  14: stn = "RST_CLK_OFF";
      15: stn = "RST_REL";     16: stn = "ISO_OFF";     17: stn = "CLK_UNGATE";
-     18: stn = "WAKE_REL";
+     18: stn = "WAKE_REL";    19: stn = "WDT_GATE";    20: stn = "WDT_CHECK";
       default: stn = "?";
     endcase
   endfunction
@@ -429,8 +454,9 @@ module tb_soc #(
     end
     // wake event accepted
     if (((dut.u_aon.u_pmu.state_q == 5'd3 && dut.u_aon.u_pmu.state_d == 5'd17) ||
-         (dut.u_aon.u_pmu.state_q == 5'd10 && dut.u_aon.u_pmu.state_d != 5'd10)) && !ep_aborted)
-      t_wake = $realtime;
+         (dut.u_aon.u_pmu.state_q == 5'd10 && dut.u_aon.u_pmu.state_d != 5'd10)) && !ep_aborted &&
+        !dut.u_aon.u_pmu.wdt_pend_q)
+      t_wake = $realtime;   // (a watchdog reset is not a wake: no latency sample)
     if (dut.u_aon.u_pmu.state_q == 5'd18 && dut.u_aon.u_pmu.state_d == 5'd0 && t_wake > 0) begin
       lat_add(1'b1, lp_kind, $realtime - t_wake);
       t_wake = 0;
@@ -453,6 +479,8 @@ module tb_soc #(
   int arc_hits [NARC];
   int illegal_arcs;
   bit ep_aborted;          // current low-power episode was refused / aborted
+  bit ep_wdt;              // current episode ended in a watchdog reset (not a wake)
+  int wdt_resets;          // completed watchdog reset sequences
   int aborted [4];         // by requested architectural state (1 IDLE, 2 SLEEP, 3 DEEP_SLEEP)
   int ps_hits [4][4];
   int ps_cur;
@@ -491,6 +519,13 @@ module tb_soc #(
       else
         $display("[tb] ABORTED transition RUN -> %s (power-down refused by PMU) @%0t", psn(req), $time);
     end
+    // Watchdog reset (doc/SOC_REGMAP.md): the return to RUN is a reset, not a
+    // completed power-state transition.
+    if (cov_s == 5'd19 || dut.u_aon.u_pmu.wdt_seq_q) ep_wdt = 1'b1;
+    if (checks_on && cov_s != state_prev && state_prev == 5'd15 && dut.u_aon.u_pmu.wdt_seq_q) begin
+      wdt_resets++;
+      $display("[tb] watchdog reset of PD_CPU @%0t", $time);
+    end
     if (cov_s == ST_RUN) begin
       cov_ps = 0;
     end
@@ -498,10 +533,10 @@ module tb_soc #(
     if (cov_s == ST_OFF)  cov_ps = dut.u_aon.ram_ret ? 3 : 2;
     if (cov_ps >= 0 && cov_ps != ps_cur) begin
       // the return to RUN after an aborted episode is not a completed transition
-      if (!(ep_aborted && cov_ps == 0)) ps_hits[ps_cur][cov_ps]++;
+      if (!((ep_aborted || ep_wdt) && cov_ps == 0)) ps_hits[ps_cur][cov_ps]++;
       ps_cur = cov_ps;
     end
-    if (cov_s == ST_RUN) ep_aborted = 1'b0;
+    if (cov_s == ST_RUN) begin ep_aborted = 1'b0; ep_wdt = 1'b0; t_wake = 0; end
     if (checks_on && cov_op != op_prev) op_hits[op_prev][cov_op]++;
     state_prev <= cov_s;
     op_prev    <= cov_op;
@@ -519,11 +554,15 @@ module tb_soc #(
     int hit = 0;
     $fdisplay(fd, "== PMU FSM transition coverage ==");
     for (int a = 0; a < NARC; a++) begin
-      $fdisplay(fd, "COV arc %s->%s %0d", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a]);
-      if (arc_hits[a] > 0) hit++;
+      if (a < NARC_PM)
+        $fdisplay(fd, "COV arc %s->%s %0d", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a]);
+      else
+        $fdisplay(fd, "COV wdt_arc %s->%s %0d", stn(arc(a) >> 5), stn(arc(a) & 10'h1F), arc_hits[a]);
+      if (arc_hits[a] > 0 && a < NARC_PM) hit++;
     end
-    $fdisplay(fd, "  arcs hit: %0d/%0d, illegal transitions: %0d", hit, NARC, illegal_arcs);
+    $fdisplay(fd, "  arcs hit: %0d/%0d, illegal transitions: %0d", hit, NARC_PM, illegal_arcs);
     $fdisplay(fd, "COV illegal transitions %0d", illegal_arcs);
+    $fdisplay(fd, "COV wdt resets %0d", wdt_resets);
     $fdisplay(fd, "== Architectural power-state transitions (completed only) ==");
     for (int f = 0; f < 4; f++)
       for (int t = 0; t < 4; t++)

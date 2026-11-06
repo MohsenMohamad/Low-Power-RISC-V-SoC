@@ -24,7 +24,8 @@ module pmu_formal (
   input logic        bus_idle_i,
   input logic        cpu_rst_ack_i,
   input logic        pwr_good_i,
-  input logic [2:0]  dvfs_active_i
+  input logic [2:0]  dvfs_active_i,
+  input logic        wdt_rst_req_i     // watchdog reset request: unconstrained
 );
   logic        ack, err, irq, idle_req, cg_en, iso_en, cpu_rst_n, pwr_sw_en, ram_ret;
   logic [31:0] rdata;
@@ -41,7 +42,7 @@ module pmu_formal (
     .core_sleep_i, .idle_ack_i, .cache_clean_i, .idle_req_o (idle_req),
     .cg_en_o (cg_en), .cg_ack_i, .bus_idle_i,
     .iso_en_o (iso_en), .cpu_rst_no (cpu_rst_n), .cpu_rst_ack_i, .pwr_sw_en_o (pwr_sw_en),
-    .pwr_good_i, .ram_ret_o (ram_ret),
+    .pwr_good_i, .ram_ret_o (ram_ret), .wdt_rst_req_i,
     .dvfs_sel_o (dvfs_sel), .dvfs_active_i, .vsel_o (vsel),
     .irq_o (irq), .state_o (state)
   );
@@ -75,13 +76,14 @@ module pmu_formal (
   // ---------------- helper invariants (proven, strengthen induction) ------
   localparam logic [4:0] RUN = 0, IDLE_REQ = 1, CLK_GATE = 2, IDLE = 3, VUP = 4, SWITCH = 5,
     VDN = 6, DRAIN = 7, ISO_ON = 8, PWR_OFF = 9, OFF = 10, RET_EXIT = 11, PWR_ON = 12,
-    RST_CLK_ON = 13, RST_CLK_OFF = 14, RST_REL = 15, ISO_OFF = 16, UNGATE = 17, WAKE_REL = 18;
+    RST_CLK_ON = 13, RST_CLK_OFF = 14, RST_REL = 15, ISO_OFF = 16, UNGATE = 17, WAKE_REL = 18,
+    WDT_GATE = 19, WDT_CHECK = 20;
 
   always @(posedge clk_i) if (rst_ni) begin
     // clock gate acknowledged off in every state after CLK_GATE
     if (state == IDLE || state == VUP || state == SWITCH || state == VDN || state == DRAIN ||
         state == ISO_ON || state == PWR_OFF || state == OFF || state == RET_EXIT ||
-        state == PWR_ON || state == RST_REL || state == ISO_OFF)
+        state == PWR_ON || state == RST_REL || state == ISO_OFF || state == WDT_CHECK)
       h_cg_off: assert (!cg_ack_i);
     if (state == RUN || state == IDLE_REQ || state == WAKE_REL)
       h_cg_on: assert (cg_ack_i);
@@ -90,13 +92,13 @@ module pmu_formal (
     if (state == RUN || state == IDLE_REQ || state == CLK_GATE || state == IDLE || state == VUP ||
         state == SWITCH || state == VDN || state == DRAIN || state == ISO_ON ||
         state == RST_CLK_ON || state == RST_CLK_OFF || state == RST_REL || state == ISO_OFF ||
-        state == UNGATE || state == WAKE_REL)
+        state == UNGATE || state == WAKE_REL || state == WDT_GATE || state == WDT_CHECK)
       h_pg_on: assert (pwr_good_i);
     // CPU reset status
     // (RUN excluded: after power-on the CPU reset may still be releasing)
     if (state == IDLE_REQ || state == CLK_GATE || state == IDLE || state == VUP ||
         state == SWITCH || state == VDN || state == DRAIN || state == ISO_OFF || state == UNGATE ||
-        state == WAKE_REL)
+        state == WAKE_REL || state == WDT_GATE || state == WDT_CHECK)
       h_rst_rel: assert (cpu_rst_ack_i);
     if (state == PWR_OFF || state == OFF || state == RET_EXIT || state == PWR_ON ||
         state == RST_CLK_ON || state == RST_CLK_OFF)
